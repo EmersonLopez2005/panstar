@@ -754,8 +754,10 @@ if command -v crontab >/dev/null 2>&1; then
 
   CRON_LINE="$CRON_SPEC $APP_DIR/run_sign.sh >> $APP_DIR/logs/cron.log 2>&1 # panstar-autosign"
   if crontab -l 2>/dev/null | grep -qF "$APP_DIR/run_sign.sh"; then
-    ylw "定时任务已存在，改用 set_schedule.sh 修改时间："
-    echo "    bash $APP_DIR/set_schedule.sh 07:30"
+    ylw "定时任务已存在，跳过安装"
+    echo "    查看当前时间： bash $APP_DIR/set_schedule.sh"
+    echo "    修改时间（把 HH:MM 换成你要的点，这条会真的改）："
+    echo "                   bash $APP_DIR/set_schedule.sh HH:MM"
   else
     ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab -
     grn "已安装定时任务（$CRON_SPEC）："

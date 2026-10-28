@@ -119,7 +119,6 @@ show_current() {
   mine="$(printf '%s\n' "$CURRENT_CRON" | grep -F "$RUN_SH" || true)"
   if [ -z "$mine" ]; then
     ylw "  还没有配置定时任务"
-    echo "  设置： bash $APP_DIR/set_schedule.sh 07:30"
     return 0
   fi
   echo ""
@@ -142,6 +141,18 @@ show_current() {
   fi
   echo ""
   echo "  查看日志: tail -f $LOG"
+}
+
+# 把 cron 前两段翻译成「每天 HH:MM」
+cron_to_time() {
+  local m h
+  m="$(printf '%s' "$1" | awk '{print $1}')"
+  h="$(printf '%s' "$1" | awk '{print $2}')"
+  if [[ "$m" =~ ^[0-9]+$ ]] && [[ "$h" =~ ^[0-9]+$ ]]; then
+    printf '每天 %02d:%02d' "$h" "$m"
+  else
+    printf '%s' "$1"
+  fi
 }
 
 # ---------------------------------------------------------------- 参数
@@ -189,9 +200,34 @@ fi
 
 if [ -z "$SPEC" ] && [ "$MODE" != "expr" ]; then
   show_current
+  # 用**当前实际时间**当示例，而不是写死一个值 ——
+  # 写死会让"只想查看"的人复制后真的改掉（踩过）
+  cur_spec="$(printf '%s\n' "$CURRENT_CRON" | grep -F "$RUN_SH" | head -1 | awk '{print $1" "$2}')"
+  cur_time=""
+  if [ -n "$cur_spec" ]; then
+    cur_m="$(printf '%s' "$cur_spec" | awk '{print $1}')"
+    cur_h="$(printf '%s' "$cur_spec" | awk '{print $2}')"
+    if [[ "$cur_m" =~ ^[0-9]+$ ]] && [[ "$cur_h" =~ ^[0-9]+$ ]]; then
+      cur_time="$(printf '%02d:%02d' "$cur_h" "$cur_m")"
+    fi
+  fi
   echo ""
-  echo "改时间： bash $APP_DIR/set_schedule.sh 07:30"
-  echo "多个时间： bash $APP_DIR/set_schedule.sh 07:30,20:00"
+  echo "  ────────────────────────────────────────────"
+  echo "  以上仅为查看，**没有做任何修改**"
+  echo ""
+  echo "  ⚠️ 带参数的调用会真的修改定时任务："
+  echo "       bash $APP_DIR/set_schedule.sh 时:分"
+  echo ""
+  if [ -n "$cur_time" ]; then
+    echo "  你当前是 ${cur_time}。把「时:分」换成你要的点，例如 08:00 就写："
+    echo "       bash $APP_DIR/set_schedule.sh 08:00"
+  else
+    echo "  例如每天 08:00："
+    echo "       bash $APP_DIR/set_schedule.sh 08:00"
+  fi
+  echo "  一天跑两次：把两个时间用逗号隔开："
+  echo "       bash $APP_DIR/set_schedule.sh 时:分,时:分"
+  echo "  ────────────────────────────────────────────"
   exit 0
 fi
 
@@ -287,10 +323,22 @@ fi
 
 printf '%s\n' "$FINAL_CRON" | crontab -
 
+# **明确显示 旧 → 新**，避免"到底改了没改"的困惑
+OLD_SPEC="$(printf '%s\n' "$CURRENT_CRON" | grep -F "$RUN_SH" | head -1 | awk '{print $1" "$2" "$3" "$4" "$5}')"
+NEW_SPEC="$(printf '%s\n' "$NEW_LINES" | head -1 | awk '{print $1" "$2" "$3" "$4" "$5}')"
+echo ""
+if [ -n "$OLD_SPEC" ]; then
+  echo "  修改前: $OLD_SPEC  （$(cron_to_time "$OLD_SPEC")）"
+else
+  echo "  修改前: （原本没有定时任务）"
+fi
+echo "  修改后: $NEW_SPEC  （$(cron_to_time "$NEW_SPEC")）"
+if [ "$OLD_SPEC" = "$NEW_SPEC" ]; then
+  ylw "  注意：新旧时间相同，实际没有变化"
+fi
+echo ""
 grn "已更新（其它 crontab 条目未动）"
 [ -n "${BACKUP_PATH:-}" ] && echo "  原 crontab 已备份: $BACKUP_PATH"
 warn_leftover
-echo ""
-echo "$NEW_LINES" | sed 's/^/  /'
 echo ""
 show_current

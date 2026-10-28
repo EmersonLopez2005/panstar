@@ -208,12 +208,25 @@ python fetch_camoufox.py
 默认**每天 03:17**（服务器本地时区）。
 
 ```bash
-bash set_schedule.sh                 # 查看当前任务和下次运行时间
-bash set_schedule.sh 07:30           # 改成每天 07:30
-bash set_schedule.sh 07:30,20:00     # 每天两次
-bash set_schedule.sh --cron "0 */6 * * *"   # 直接写 cron 表达式
-bash set_schedule.sh --remove        # 删除定时任务
+# 只看，不改（无参数=只读）
+bash set_schedule.sh
+
+# 改成每天 07:30（注意：带参数会真的修改）
+bash set_schedule.sh 07:30
+
+# 每天两次
+bash set_schedule.sh 07:30,20:00
+
+# 直接写 cron 表达式
+bash set_schedule.sh --cron "0 */6 * * *"
+
+# 删除
+bash set_schedule.sh --remove
 ```
+
+> ⚠️ **无参数 = 只查看，不会改动**；**带参数 = 真的修改**。
+> 脚本会把「修改前 → 修改后」并排打出来，方便确认。
+> 如果新旧时间相同，会明确提示"实际没有变化"。
 
 也可以在安装时直接指定：
 
