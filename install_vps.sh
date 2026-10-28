@@ -171,18 +171,75 @@ if [ ! -x "$PY" ]; then
 fi
 "$PY" -m pip install --upgrade pip --quiet
 "$PY" -m pip install -r "$APP_DIR/requirements.txt" --quiet
-grn "Python 依赖就绪"
+# agent 依赖也必须装 —— 只装主 requirements.txt 会缺 flask，
+# 结果 systemd 里的 panstar-agent 起来就崩（ModuleNotFoundError: flask）。
+"$PY" -m pip install -r "$APP_DIR/agent/requirements.txt" --quiet
+grn "Python 依赖就绪（含 agent 依赖）"
 
 # ---------------------------------------------------------------- 浏览器
 step "安装浏览器内核（$ENGINE）"
+
+# **TMPDIR 必须是关键变量。**
+# camoufox 内部用 `tempfile.NamedTemporaryFile()`（不指定 dir）来存下载的 zip，
+# 也就是落在 `$TMPDIR` 或 `/tmp`。
+# 很多 VPS 把 /tmp 挂成 tmpfs（内存盘，通常只有几百 MB），
+# 于是会出现「df 显示还有 6GB，但下载到 0.5GB 就 No space left on device」。
+# 把 TMPDIR 指到大盘上，这个坑就绕过去了。
+TMP_BASE="${TMPDIR:-/tmp}"
+if [ -n "$CACHE_HOME" ]; then
+  TMP_BASE="$CACHE_HOME"
+fi
+export TMPDIR="$TMP_BASE"
+mkdir -p "$TMPDIR" 2>/dev/null || true
+TMP_AVAIL_MB=$(df -Pm "$TMPDIR" 2>/dev/null | awk 'NR==2 {print $4}')
+TMP_MOUNT=$(df -Pm "$TMPDIR" 2>/dev/null | awk 'NR==2 {print $1}')
+echo "  TMPDIR=$TMPDIR（挂载点 $TMP_MOUNT，可用 ${TMP_AVAIL_MB:-?} MB）"
+if [ -n "${TMP_AVAIL_MB:-}" ] && [ "$TMP_AVAIL_MB" -lt 3072 ]; then
+  red "  ⚠️ 临时目录空间不足（${TMP_AVAIL_MB} MB）—— 下载一定失败！"
+  echo "     这就是 'No space left on device' 的真正原因（跟磁盘总量无关）。"
+  echo "     临时改指向大盘："
+  echo "       export TMPDIR=/mnt/你的大盘/tmp && mkdir -p \$TMPDIR"
+  echo "     或直接用本脚本的 --cache 参数（会自动设好 TMPDIR）："
+  echo "       bash $APP_DIR/install_vps.sh --engine=$ENGINE --cache=/mnt/你的大盘"
+  if [ "$FORCE" != "1" ]; then
+    exit 1
+  fi
+fi
+
 if [ "$ENGINE" = "camoufox" ]; then
   "$PY" -m pip install "camoufox[geoip]" --quiet
-  "$PY" -m camoufox fetch
-  grn "Camoufox 就绪（约 1.3GB，下载慢是正常的）"
+  "$PY" -m camoufox fetch || true
+  # **必须校验本体是否真的落地。**
+  # camoufox CLI 遇到下载失败会打印 Error 但仍以 0 退出，
+  # 只看退出码会把「下载失败」误判成「安装成功」。
+  VERIFY="$(PS_APP_DIR="$APP_DIR" "$PY" - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["PS_APP_DIR"])
+try:
+    from browser_engine import engine_status
+    st = engine_status()
+    print("1" if st.get("camoufox", {}).get("binary") else "0")
+except Exception as exc:
+    print("0")
+    print(f"  (校验异常: {exc})", file=sys.stderr)
+PY
+)"
+  if [ "$VERIFY" != "1" ]; then
+    red "  ❌ Camoufox 浏览器本体没装上（下载失败或空间不足）"
+    echo ""
+    echo "  手动重试（记得先确认 TMPDIR 指向大盘）："
+    echo "    export TMPDIR=/mnt/你的大盘/tmp && mkdir -p \$TMPDIR"
+    echo "    $PY -m camoufox fetch"
+    echo ""
+    echo "  查看到底差多少："
+    echo "    df -h $TMPDIR $HOME/.cache"
+    exit 1
+  fi
+  grn "Camoufox 就绪（浏览器本体已确认存在）"
 else
   "$PY" -m pip install patchright --quiet
   "$PY" -m patchright install --with-deps chromium
-  grn "Patchright Chromium 就绪（约 200MB）"
+  grn "Patchright Chromium 就绪（约 400MB）"
 fi
 
 # ---------------------------------------------------------------- 配置
@@ -195,6 +252,8 @@ fi
 
 # 浏览器缓存位置写进 .env，让 run_sign.sh / agent 每次都带上。
 # Camoufox 认 XDG_CACHE_HOME，Playwright/Patchright 认 PLAYWRIGHT_BROWSERS_PATH。
+# TMPDIR 同样要写进去 —— camoufox 下载 zip 时用的是 tempfile，
+# 落在 /tmp（很可能是小 tmpfs）就会 No space left on device。
 if [ -n "$CACHE_HOME" ]; then
   set_env() {
     local key="$1" val="$2"
@@ -207,6 +266,18 @@ if [ -n "$CACHE_HOME" ]; then
   set_env XDG_CACHE_HOME "$CACHE_HOME"
   set_env PLAYWRIGHT_BROWSERS_PATH "$CACHE_HOME/ms-playwright"
   grn "已把缓存路径写入 .env"
+fi
+if [ -n "${TMPDIR:-}" ] && [ "$TMPDIR" != "/tmp" ]; then
+  set_env() {
+    local key="$1" val="$2"
+    if grep -qE "^${key}=" "$APP_DIR/.env"; then
+      sed -i "s|^${key}=.*|${key}=${val}|" "$APP_DIR/.env"
+    else
+      printf '%s=%s\n' "$key" "$val" >> "$APP_DIR/.env"
+    fi
+  }
+  set_env TMPDIR "$TMPDIR"
+  grn "已把 TMPDIR=$TMPDIR 写入 .env"
 fi
 mkdir -p "$APP_DIR/logs" "$APP_DIR/data" "$APP_DIR/cookie"
 
@@ -224,6 +295,11 @@ PY
 Environment=PLAYWRIGHT_BROWSERS_PATH=$CACHE_HOME/ms-playwright"
   else
     AGENT_CACHE_ENV="Environment=XDG_CACHE_HOME=$HOME/.cache"
+  fi
+  # TMPDIR：camoufox 下载 zip 走 tempfile，默认落 /tmp（可能是小 tmpfs）
+  if [ -n "${TMPDIR:-}" ]; then
+    AGENT_CACHE_ENV="$AGENT_CACHE_ENV
+Environment=TMPDIR=$TMPDIR"
   fi
   cat > /etc/systemd/system/panstar-agent.service <<EOF
 [Unit]
@@ -260,18 +336,48 @@ EOF
     echo "  → 把上面这行写进 $APP_DIR/.env 的 LOGIN_AGENT_TOKEN"
   else
     red "浏览器代理启动失败，看日志：journalctl -u panstar-agent -n 50"
+    echo ""
+    echo "  最常见原因（按概率排序）："
+    echo "    1) 缺 flask 依赖 → 日志里有 ModuleNotFoundError: flask"
+    echo "       修复：$PY -m pip install -r $APP_DIR/agent/requirements.txt"
+    echo "    2) 浏览器本体没装上 → 日志里有 CamoufoxNotInstalled"
+    echo "       修复：$PY -m camoufox fetch"
+    echo "    3) 端口 3000 被占 → journalctl -u panstar-agent -n 20"
+    echo ""
+    echo "  实时日志：journalctl -u panstar-agent -f"
   fi
 fi
 
 # ---------------------------------------------------------------- 定时任务
 step "安装定时任务"
-CRON_LINE="17 3 * * * $APP_DIR/run_sign.sh >> $APP_DIR/logs/cron.log 2>&1"
-if crontab -l 2>/dev/null | grep -qF "$APP_DIR/run_sign.sh"; then
-  ylw "定时任务已存在，跳过"
+# Debian/Ubuntu 精简安装里常常**没有 cron**，
+# 直接 crontab 会报 "crontab: command not found"，而且定时任务根本没装上。
+if ! command -v crontab >/dev/null 2>&1; then
+  ylw "  系统没装 cron，先装"
+  $SUDO apt-get install -y --no-install-recommends cron >/dev/null 2>&1
+  if command -v crontab >/dev/null 2>&1; then
+    grn "  cron 已安装"
+    # 服务不一定要 enable（容器里没 systemd），但能起就起
+    $SUDO systemctl enable cron >/dev/null 2>&1 || true
+    $SUDO systemctl restart cron >/dev/null 2>&1 || true
+  else
+    red "  ❌ cron 装不上 —— 定时任务无法安装"
+    echo "     手动排查： apt-get install cron"
+    echo "     临时替代：用 systemd timer 跑 $APP_DIR/run_sign.sh"
+  fi
+fi
+
+if command -v crontab >/dev/null 2>&1; then
+  CRON_LINE="17 3 * * * $APP_DIR/run_sign.sh >> $APP_DIR/logs/cron.log 2>&1"
+  if crontab -l 2>/dev/null | grep -qF "$APP_DIR/run_sign.sh"; then
+    ylw "定时任务已存在，跳过"
+  else
+    ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab -
+    grn "已安装定时任务（每天 03:17）："
+    echo "  $CRON_LINE"
+  fi
 else
-  ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab -
-  grn "已安装定时任务（每天 03:17）："
-  echo "  $CRON_LINE"
+  red "  ⚠️ 定时任务没装上（缺 crontab 命令）"
 fi
 
 step "完成"

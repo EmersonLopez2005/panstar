@@ -30,11 +30,25 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from typing import Any, Dict
 
 from flask import Flask, jsonify, request
+
+# browser_engine 只在项目根目录维护一份（agent/ 下不再放副本）。
+# 这里按「同目录 → 上一级」的顺序找，兼容两种部署：
+#   - systemd：$APP_DIR/agent/panstar_agent.py → 上一级 $APP_DIR/browser_engine.py
+#   - docker ：/app/panstar_agent.py        → 同目录 /app/browser_engine.py
+# （以前这里是两份各改各的副本，已经出现过版本脱节。）
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PARENT = os.path.dirname(_HERE)
+for _candidate in (_HERE, _PARENT):
+    if os.path.exists(os.path.join(_candidate, "browser_engine.py")):
+        if _candidate not in sys.path:
+            sys.path.insert(0, _candidate)
+        break
 
 from browser_engine import browser_page
 

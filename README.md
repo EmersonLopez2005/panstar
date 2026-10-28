@@ -120,7 +120,6 @@ panstar-autosign/
 ├── cleanup_disk.sh         磁盘清理（apt缓存/旧内核/Docker镜像/日志）
 ├── agent/
 │   ├── panstar_agent.py    浏览器代理 HTTP 服务
-│   ├── browser_engine.py   （同上，agent 侧副本）
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── entrypoint.sh
@@ -128,6 +127,10 @@ panstar-autosign/
 ├── data/                   令牌缓存 + 浏览器 profile
 └── .env                    配置（别提交）
 ```
+
+> `browser_engine.py` **只维护一份**（在项目根目录）。agent 侧按
+> 「同目录 → 上一级」顺序查找，systemd 和 Docker 两种部署都能找到。
+> 以前 `agent/` 下还有一份副本，两边已经出现过版本脱节。
 
 ## 排错
 
@@ -160,9 +163,16 @@ Camoufox 的真实开销是 **峰值约 2.6GB**（下载包 ~1.2GB 和解压后�
 | 定位大头 | `bash cleanup_disk.sh` | 扫全盘 Top 15，直接告诉你空间在哪 |
 | 清理 | `bash cleanup_disk.sh --clean` | apt 缓存、旧内核、Docker 悬空镜像、journald |
 | **换大盘放内核** | `bash install_vps.sh --cache=/mnt/大硬盘` | **最有效**，浏览器内核挪到另一块盘 |
+| **修 /tmp 是小 tmpfs** | `export TMPDIR=/mnt/大硬盘/tmp` | camoufox 的 zip 落在 `$TMPDIR`，不改这个照样 ENOSPC |
 | 换轻量引擎 | `bash install_vps.sh --engine=patchright` | 约 400MB，但过 CF 成功率较低 |
 | 省中文字体 | `bash install_vps.sh --no-cjk-fonts` | 省约 250MB（页面可能显示方框） |
 | 硬装 | `bash install_vps.sh --force` | 跳过空间检查（可能中途失败） |
+
+> **为什么 `df` 显示 6GB 也会 ENOSPC？**
+> camoufox 内部用 `tempfile.NamedTemporaryFile()`（不指定 `dir`）存下载的 zip，
+> 落在 `$TMPDIR` 或 `/tmp`。很多 VPS 把 `/tmp` 挂成 tmpfs（内存盘，只有几百 MB），
+> 于是「磁盘有 6GB，但下载到 0.5GB 就失败」。
+> 安装脚本现在会检测临时目录可用空间并在不足时直接报错。
 
 > `--cache=` 用「软链接 + `XDG_CACHE_HOME`」双保险实现：
 > Camoufox 认 `XDG_CACHE_HOME`，Playwright/Patchright 认 `PLAYWRIGHT_BROWSERS_PATH`。
@@ -179,7 +189,11 @@ Camoufox 的真实开销是 **峰值约 2.6GB**（下载包 ~1.2GB 和解压后�
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `No space left on device` | 磁盘满，Camoufox 下到一半失败 | `bash cleanup_disk.sh --clean`，然后 `python -m camoufox fetch` 重装 |
+| `No space left on device`（但 `df` 显示空间充足） | **camoufox 把下载的 zip 落在 `$TMPDIR`/`/tmp`**，很多 VPS 的 `/tmp` 是小 tmpfs（内存盘） | `export TMPDIR=/大盘/tmp && mkdir -p $TMPDIR` 再重装；安装脚本会自动检测并提示 |
+| 下载到一半 ENOSPC | 同上 | 同上 |
+| 装完显示"就绪"但实际没有浏览器 | camoufox CLI 失败时仍返回 0 | 现已改为校验 `camoufox-bin` 是否真的存在，不存在直接报错退出 |
+| `ModuleNotFoundError: flask`（agent 起不来） | 只装了主 requirements，漏了 agent 依赖 | 已修：安装脚本现在会装 `agent/requirements.txt` |
+| `crontab: command not found` | Debian 精简安装没有 cron | 已修：安装脚本会自动 `apt-get install cron` |
 | 清理完磁盘一点没释放 | 大头不在 apt/Docker/日志里 | `bash cleanup_disk.sh` 看全盘 Top 15，或 `du -xh --max-depth=1 / \| sort -h \| tail -15` |
 | `没有可用的浏览器引擎` | pip 装了包但浏览器本体没下载 | `python -m camoufox fetch`（约 1.2GB） |
 | 装好了却说找不到浏览器 | `--cache=` 装到了大盘，但 cron 环境没带上变量 | 重新跑 `install_vps.sh --cache=...`（会写进 `.env`），或直接 `export XDG_CACHE_HOME=...` |

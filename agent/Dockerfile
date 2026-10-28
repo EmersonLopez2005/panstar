@@ -8,6 +8,9 @@
 # 会被 CF 直接判成 bot，Camoufox 的指纹伪装实测能过。
 # 想换轻量 Chromium：
 #   docker build --build-arg ENGINE=patchright -t panstar-agent:chromium .
+#
+# 构建上下文是**项目根目录**（不是 agent/），因为 browser_engine.py 只在根目录
+# 维护一份 —— 之前 agent/ 下还有副本，两边已经出现过版本脱节。
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -31,7 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY agent/requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt \
     && if [ "$ENGINE" = "camoufox" ]; then \
          pip install "camoufox[geoip]" && python -m camoufox fetch ; \
@@ -39,7 +42,9 @@ RUN pip install --upgrade pip && pip install -r requirements.txt \
          pip install patchright && patchright install --with-deps chromium ; \
        fi
 
-COPY . .
+# browser_engine.py 只维护一份，在项目根目录
+COPY browser_engine.py ./
+COPY agent/panstar_agent.py agent/entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
 ENV AGENT_ENGINE=${ENGINE} \

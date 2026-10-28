@@ -1,7 +1,10 @@
 services:
   panstar-agent:
     build:
-      context: .
+      # 构建上下文是**项目根目录**，不是 agent/ ——
+      # browser_engine.py 只在根目录维护一份（agent/ 下的旧副本已删除）。
+      context: ..
+      dockerfile: agent/Dockerfile
       args:
         # camoufox(默认，实测能过 CF) / patchright(轻但过 CF 成功率低)
         ENGINE: camoufox
@@ -9,7 +12,7 @@ services:
     container_name: panstar-agent
     restart: unless-stopped
     env_file:
-      - .env
+      - ../.env
     environment:
       AGENT_HOST: 0.0.0.0
       AGENT_PORT: "3000"

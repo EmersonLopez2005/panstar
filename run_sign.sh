@@ -30,11 +30,11 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
 if [ -f "$APP_DIR/.env" ]; then
   while IFS='=' read -r k v; do
     case "$k" in
-      XDG_CACHE_HOME|PLAYWRIGHT_BROWSERS_PATH)
+      XDG_CACHE_HOME|PLAYWRIGHT_BROWSERS_PATH|TMPDIR)
         [ -n "$v" ] && export "$k=$v"
         ;;
     esac
-  done < <(grep -E '^(XDG_CACHE_HOME|PLAYWRIGHT_BROWSERS_PATH)=' "$APP_DIR/.env" 2>/dev/null)
+  done < <(grep -E '^(XDG_CACHE_HOME|PLAYWRIGHT_BROWSERS_PATH|TMPDIR)=' "$APP_DIR/.env" 2>/dev/null)
 fi
 
 LOG_DIR="$APP_DIR/logs"
