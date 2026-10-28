@@ -271,20 +271,34 @@ def api_checkin():
             engine=ENGINE, headless=HEADLESS,
             user_data_dir=profile, proxy=PROXY,
         ) as page:
-            # 注入令牌（前端从 localStorage 读）
+            # 注入令牌，让前端不用走登录表单。
+            #
+            # **add_init_script 的签名是 (script, path)** ——
+            # 只接受 2 个参数，不支持往里传变量（那是 evaluate 的用法）。
+            # 而且要传的是**会被执行的语句**，不是箭头函数 ——
+            # add_init_script 不会自动调用箭头函数。
+            # 所以这里把值直接嵌进 JS 源码（用 json.dumps 做安全转义）。
+            #
+            # 键名和事件名都从站点前端 bundle 里核实过，不是猜的：
+            #   setTokens(e, t) {
+            #     localStorage.setItem("accessToken", e),
+            #     localStorage.setItem("refreshToken", t),
+            #     window.dispatchEvent(new Event("idc:auth-token-change"))
+            #   }
             if access_token:
-                page.add_init_script(
-                    """
-                    (a, r) => {
-                      try {
-                        localStorage.setItem('accessToken', a);
-                        if (r) localStorage.setItem('refreshToken', r);
-                      } catch (e) {}
-                    }
-                    """,
-                    access_token,
-                    refresh_token,
+                init_js = (
+                    "(() => {\n"
+                    "  try {\n"
+                    f"    localStorage.setItem('accessToken', {json.dumps(access_token)});\n"
+                    f"    localStorage.setItem('refreshToken', {json.dumps(refresh_token or '')});\n"
+                    "  } catch (e) {}\n"
+                    "})();"
                 )
+                try:
+                    page.add_init_script(init_js)
+                except Exception as exc:  # noqa: BLE001
+                    # 注入失败不该让整个流程崩 —— 下面还有表单登录兜底
+                    print(f"[checkin] 注入令牌失败（将走表单登录）: {exc}", flush=True)
 
             result = _do_browser_checkin(page, username, password)
         cost = round(time.time() - started, 1)
@@ -322,9 +336,12 @@ def _do_browser_checkin(page, username: str, password: str) -> Dict[str, Any]:
 
     if "/login" in page.url and username and password:
         print("[checkin] 需要登录，走登录表单", flush=True)
+        # **evaluate 的签名是 (expression, arg)** —— 只能传一个参数。
+        # 多个值要打包成一个对象传进去（之前传了 username, password
+        # 两个位置参数，共 3 个 → TypeError）。
         page.evaluate(
             """
-            (u, p) => {
+            ({ u, p }) => {
               const ins = [...document.querySelectorAll('input:not([type=hidden])')];
               const em = ins.find(i => i.type === 'email' || /email|账号/i.test(i.placeholder || ''));
               const pw = ins.find(i => i.type === 'password');
@@ -338,7 +355,7 @@ def _do_browser_checkin(page, username: str, password: str) -> Dict[str, Any]:
               return true;
             }
             """,
-            username, password,
+            {"u": username, "p": password},
         )
         page.evaluate(
             """

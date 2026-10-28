@@ -176,6 +176,62 @@ def test_agent_helpers() -> None:
         panstar_agent.AGENT_TOKEN = orig
 
 
+def test_playwright_api_signatures() -> None:
+    """Playwright 调用不能传多余的参数。
+
+    真实案例：`page.add_init_script` 的签名是 `(script, path)` ——
+    只接受 2 个参数，不支持像 `evaluate` 那样往脚本里传变量。
+    把 evaluate 的写法套上去就会炸：
+      TypeError: Page.add_init_script() takes from 1 to 2 positional
+                 arguments but 4 were given
+    而且只在实际跑浏览器时才暴露（和 @contextmanager 那个坑一样）。
+
+    这里用 AST 静态检查几个容易搞混的 API 的**位置参数个数**。
+    """
+    print("【5】Playwright API 参数检查")
+
+    # 方法名 -> (最大位置参数个数, 说明)
+    LIMITS = {
+        "add_init_script": (2, "签名是 (script, path)，不能传变量"),
+        "goto": (2, "签名是 (url, **kwargs)"),
+        "evaluate": (2, "签名是 (expression, arg)"),
+        "evaluate_handle": (2, "签名是 (expression, arg)"),
+        "set_content": (2, "签名是 (html, **kwargs)"),
+        "query_selector": (2, "签名是 (selector)"),
+        "wait_for_selector": (2, "签名是 (selector, **kwargs)"),
+        "fill": (3, "签名是 (selector, value, **kwargs)"),
+    }
+
+    targets = ["agent/panstar_agent.py", "browser_engine.py",
+               "turnstile_solver.py"]
+    problems = []
+    for rel in targets:
+        path = os.path.join(APP_DIR, rel)
+        if not os.path.exists(path):
+            continue
+        try:
+            tree = ast.parse(open(path, encoding="utf-8").read())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute):
+                continue
+            name = func.attr
+            if name not in LIMITS:
+                continue
+            limit, why = LIMITS[name]
+            n = len(node.args)
+            if n > limit:
+                problems.append(
+                    f"{rel}:{node.lineno} {name}() 传了 {n} 个位置参数"
+                    f"（上限 {limit}，{why}）"
+                )
+    check("Playwright API 参数个数正确", not problems, "; ".join(problems))
+
+
 def main() -> int:
     print("=" * 62)
     print("冒烟测试")
@@ -184,6 +240,7 @@ def main() -> int:
     test_memory_helpers()
     test_env_parsing()
     test_agent_helpers()
+    test_playwright_api_signatures()
     print()
     if FAILED:
         print(f"❌ {len(FAILED)} 项失败：")
