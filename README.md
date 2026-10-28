@@ -132,6 +132,33 @@ panstar-autosign/
 > 「同目录 → 上一级」顺序查找，systemd 和 Docker 两种部署都能找到。
 > 以前 `agent/` 下还有一份副本，两边已经出现过版本脱节。
 
+## 机器规格要求（重要）
+
+Camoufox（Firefox 定制版）单个实例常驻 **300-500MB**。这决定了你的 VPS 规格：
+
+| 规格 | 能否跑浏览器签到 |
+|---|---|
+| **≥ 2 核 / ≥ 2GB** | ✅ 舒适 |
+| 1 核 / 1GB | ⚠️ 勉强，需要加 swap；已自动开启低内存模式 |
+| < 1GB | ❌ 不建议，会 swap 抖动（CPU 100%、机器卡死） |
+
+**低内存模式**（内存 < 1.2GB 时自动开启）会做三件事：
+- 关掉 `humanize`（鼠标轨迹模拟，纯 CPU 开销，对过 CF 无实质帮助）
+- systemd 给 agent 加 `MemoryMax=600M`（超了 OOM 重启，而不是把整机拖进 swap）
+- agent 失败后**不再在本机叠加第二个浏览器** —— 这是最关键的一条
+
+> **为什么会卡死？** 两个 Firefox 实例同时抢 1 核 / 967MB 内存 → 内存耗尽 →
+> swap 抖动 → CPU 100% 但什么都干不完。此时连日志都写不出来，
+> 看起来像"脚本卡住了"，其实是内存不够。
+> 判据：`free -m` 看 `available`，低于 600MB 时脚本会主动放弃起第二个浏览器。
+
+小内存机器建议加 swap：
+
+```bash
+fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
+
 ## 排错
 
 ```bash
@@ -198,8 +225,9 @@ Camoufox 的真实开销是 **峰值约 2.6GB**（下载包 ~1.2GB 和解压后�
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
+| **CPU 100%、机器卡死、日志一行不出** | **内存不足导致 swap 抖动** —— 两个浏览器实例抢 1 核 / 1GB | 加 swap（见上）；或换 ≥2GB 的机器；新版已限制"不叠加第二个浏览器" |
 | `No space left on device`（但 `df` 显示空间充足） | **camoufox 把下载的 zip 落在 `$TMPDIR`/`/tmp`**，很多 VPS 的 `/tmp` 是小 tmpfs（内存盘） | `export TMPDIR=/大盘/tmp && mkdir -p $TMPDIR` 再重装；安装脚本会自动检测并提示 |
-| `FileExistsError: [Errno 17] File exists: '.../camoufox'` | `--cache` 指向的目录**正好是 `$HOME/.cache` 本身**，脚本造出了指向自己的软链接 | 换一个 `--cache` 路径（如 `--cache=/root/browser`），或直接不用 `--cache` |
+| `FileExistsError: [Errno 17] File exists: '.../camoufox'` | `~/.cache/camoufox` 是坏软链接（自环或断链） | `rm -f ~/.cache/camoufox ~/.cache/ms-playwright`（新版脚本会自动清） |
 | 下载到一半 ENOSPC | 同上 | 同上 |
 | 装完显示"就绪"但实际没有浏览器 | camoufox CLI 失败时仍返回 0 | 现已改为校验 `camoufox-bin` 是否真的存在，不存在直接报错退出 |
 | `ModuleNotFoundError: flask`（agent 起不来） | 只装了主 requirements，漏了 agent 依赖 | 已修：安装脚本现在会装 `agent/requirements.txt` |

@@ -252,6 +252,47 @@ def parse_proxy(proxy: Optional[str]) -> Optional[dict]:
 
 
 @contextmanager
+def _memory_mb() -> int:
+    """系统可用内存（MB）。读不到时返回一个大数（不做限制）。"""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 99999
+
+
+def _low_memory_mode() -> bool:
+    """是否处于「小内存机器」模式。
+
+    1 核 / 1GB 以下的 VPS 上，一个 Camoufox 实例就要吃掉几百 MB。
+    这时候再叠加第二个浏览器实例（agent 的 + 本地回退的），
+    就会触发 swap 抖动 —— 表现是 CPU 100% 但什么都干不完，机器直接卡死。
+    """
+    if os.getenv("PS_LOW_MEMORY", "").strip() in ("1", "true", "yes"):
+        return True
+    avail = _memory_mb()
+    # 可用内存低于 700MB 视为小内存机器
+    return avail < 700
+
+
+def _apply_memory_limits() -> None:
+    """给 Firefox 进程设内存上限，防止单个实例把整机内存吃光。
+
+    Firefox 默认不管内存，页面多 + 有头模式下很容易冲到 1GB+。
+    这里用 MOZ_* 环境变量限制地址空间，配合 low-memory 模式进一步收紧。
+    """
+    if os.environ.get("PS_NO_MEM_LIMIT"):
+        return
+    if _low_memory_mode():
+        # 小内存机器：把地址空间压到 512MB，触发 GC 更频繁但不会 OOM
+        os.environ.setdefault("MOZ_DISABLE_CONTENT_SANDBOX", "1")
+        os.environ.setdefault("MOZ_FORCE_DISABLE_E10S", "1")
+
+
+@contextmanager
 def browser_page(
     engine: str = "auto",
     headless: bool = False,
@@ -260,15 +301,22 @@ def browser_page(
     locale: str = DEFAULT_LOCALE,
     timezone: str = DEFAULT_TZ,
     slow_mo: int = 0,
-    humanize: bool = True,
+    humanize: Optional[bool] = None,
 ):
     """打开一个浏览器页面，yield 出 playwright 的 Page 对象。
 
     用 user_data_dir 时是持久化 profile —— 指纹稳定，
     Cloudflare 不会每次都把当新设备重新挑战。
+
+    humanize 默认为 True，但小内存机器上会自动关掉
+    （它会持续跑鼠标轨迹模拟，是纯 CPU 开销，对过 CF 无实质帮助）。
     """
     name = resolve_engine(engine)
     proxy_cfg = parse_proxy(proxy)
+
+    low_mem = _low_memory_mode()
+    if humanize is None:
+        humanize = not low_mem
 
     if user_data_dir:
         os.makedirs(user_data_dir, exist_ok=True)

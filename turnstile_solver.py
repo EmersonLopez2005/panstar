@@ -197,10 +197,37 @@ def check_agent_health(agent_url: str, agent_token: str = "") -> dict:
         return {
             "ok": bool(data.get("ok")),
             "engine": data.get("engine", ""),
+            "busy": bool(data.get("busy", False)),
             "message": data.get("message", ""),
         }
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "engine": "", "message": str(exc)}
+        return {"ok": False, "engine": "", "busy": False, "message": str(exc)}
+
+
+def _available_memory_mb() -> int:
+    """系统可用内存（MB）。读不到返回一个大数。"""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 99999
+
+
+def _can_start_local_browser() -> bool:
+    """本机还有没有余量再起一个浏览器。
+
+    小内存机器（1 核 / 1GB）上，agent 的浏览器刚失败退出、
+    内存还没释放干净，这时再起一个本地浏览器会直接 swap 抖动 ——机器卡死。
+    """
+    avail = _available_memory_mb()
+    if avail < 600:
+        print(f"[turnstile] ⚠️ 可用内存仅 {avail} MB，不再启动本地浏览器"
+              "（会引发 swap 抖动把机器拖死）")
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -236,18 +263,23 @@ def get_turnstile_token(site_key: str, url: str, action: str = "",
                 attempts.append(f"浏览器代理: {exc}")
                 print(f"[turnstile] 浏览器代理失败: {exc}")
 
-    try:
-        print("[turnstile] 尝试路径2：本地浏览器")
-        token = solve_via_local_browser(
-            site_key, url, action,
-            profile_dir=local_profile,
-            headless=headless,
-        )
-        print(f"[turnstile] 本地浏览器成功 (token {len(token)} 字符)")
-        return token
-    except Exception as exc:
-        attempts.append(f"本地浏览器: {exc}")
-        print(f"[turnstile] 本地浏览器失败: {exc}")
+    # 路径 2：本地浏览器
+    # agent 刚失败过就不要再叠加一个浏览器实例 —— 小内存机器会卡死。
+    if agent_url and not _can_start_local_browser():
+        attempts.append("本地浏览器: 可用内存不足，跳过（避免与 agent 抢内存导致机器卡死）")
+    else:
+        try:
+            print("[turnstile] 尝试路径2：本地浏览器")
+            token = solve_via_local_browser(
+                site_key, url, action,
+                profile_dir=local_profile,
+                headless=headless,
+            )
+            print(f"[turnstile] 本地浏览器成功 (token {len(token)} 字符)")
+            return token
+        except Exception as exc:
+            attempts.append(f"本地浏览器: {exc}")
+            print(f"[turnstile] 本地浏览器失败: {exc}")
 
     raise TurnstileError(
         "所有 Turnstile 通道都失败:\n  " + "\n  ".join(attempts or ["没有配置任何通道"])

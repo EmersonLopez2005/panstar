@@ -110,6 +110,25 @@ if [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "aarch64" ]; then
   ylw "非 x86_64/aarch64，浏览器可能没有现成构建"
 fi
 
+# ---------------------------------------------------------------- 机器规格
+# Camoufox（Firefox 定制版）单个实例常驻 300-500MB。
+# 1 核 / 1GB 的机器跑浏览器签到非常勉强 —— 两个浏览器实例同时起来就会
+# swap 抖动，表现为 CPU 100%、机器卡死、日志一行都出不来。
+LOW_MEMORY=0
+MEM_TOTAL_MB=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
+CPU_CORES=$(nproc 2>/dev/null || echo 1)
+echo "  内存 ${MEM_TOTAL_MB} MB / CPU ${CPU_CORES} 核"
+if [ "${MEM_TOTAL_MB:-0}" -lt 1200 ] 2>/dev/null; then
+  LOW_MEMORY=1
+  ylw "  ⚠️ 小内存机器（${MEM_TOTAL_MB} MB）：浏览器签到会很吃力"
+  echo "     已自动收紧资源限制（agent 限 600M、小内存模式关掉 humanize）。"
+  echo "     若仍卡死，建议换一台内存 ≥ 2GB 的 VPS，或加 swap："
+  echo "       fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+fi
+if [ "$LOW_MEMORY" = "1" ]; then
+  export PS_LOW_MEMORY=1
+fi
+
 # ---------------------------------------------------------------- 系统依赖
 step "安装系统依赖"
 $SUDO apt-get update -qq
@@ -403,6 +422,18 @@ Environment=PLAYWRIGHT_BROWSERS_PATH=$CACHE_HOME/ms-playwright"
     AGENT_CACHE_ENV="$AGENT_CACHE_ENV
 Environment=TMPDIR=$TMPDIR"
   fi
+  # 资源上限：浏览器只在跑挑战那几十秒吃内存，平时 agent 只有几十 MB。
+  # 但 1 核 / 1GB 的小机器上，不加限制会直接把整机拖进 swap 抖动。
+  AGENT_LIMITS="MemoryMax=700M
+MemorySwapMax=1G
+TasksMax=256"
+  if [ "$LOW_MEMORY" = "1" ]; then
+    # 小内存机器：给得更紧，宁可浏览器 OOM 重启也不要整机卡死
+    AGENT_LIMITS="MemoryMax=600M
+MemorySwapMax=1G
+TasksMax=128
+OOMPolicy=stop"
+  fi
   cat > /etc/systemd/system/panstar-agent.service <<EOF
 [Unit]
 Description=PanstarCloud browser agent (Turnstile solver)
@@ -420,9 +451,11 @@ Environment=AGENT_ENGINE=$ENGINE
 Environment=AGENT_PROFILE_DIR=$APP_DIR/agent/data/profiles
 $AGENT_CACHE_ENV
 Environment=TZ=Asia/Shanghai
+$AGENT_LIMITS
 ExecStart=$VENV/bin/python $APP_DIR/agent/panstar_agent.py
 Restart=always
 RestartSec=5
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target

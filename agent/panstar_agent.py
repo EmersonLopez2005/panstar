@@ -69,6 +69,21 @@ CHECKIN_ACTION = "points_checkin"
 # 同一时间只跑一个浏览器任务（浏览器很吃内存）
 _lock = threading.Lock()
 
+# 当前是否有浏览器任务在跑。主脚本靠这个判断
+# 「要不要在本机也起一个浏览器」—— 小内存机器上两个一起跑会 swap 抖动卡死。
+_BUSY = threading.Event()
+
+# 小内存机器上，锁等待时间要短。宁可快速失败让主脚本走别的路，
+# 也不要干等着把机器拖垮。
+LOCK_WAIT = int(os.getenv("AGENT_LOCK_WAIT", "120"))
+
+
+def _busy_state() -> Dict[str, Any]:
+    return {
+        "busy": _BUSY.is_set(),
+        "lock_wait": LOCK_WAIT,
+    }
+
 app.logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
 
@@ -145,6 +160,7 @@ def _grab_turnstile(page, site_key: str, action: str, page_url: str,
 @app.get("/health")
 def health():
     from browser_engine import resolve_engine
+    state = _busy_state()
     return jsonify({
         "ok": True,
         "service": "panstar-browser-agent",
@@ -153,6 +169,7 @@ def health():
         "headless": HEADLESS,
         "proxy": bool(PROXY),
         "domain": DOMAIN,
+        "busy": state["busy"],
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
     })
 
@@ -173,10 +190,11 @@ def api_turnstile():
     action = (body.get("action") or CHECKIN_ACTION).strip()
     profile_name = (body.get("profile") or "default").strip()
 
-    if not _lock.acquire(timeout=300):
+    if not _lock.acquire(timeout=LOCK_WAIT):
         return jsonify({"ok": False, "error": "BUSY",
                         "message": "浏览器忙，请稍后重试"}), 429
 
+    _BUSY.set()
     started = time.time()
     try:
         # 用 os.path.join 而不是手拼路径 —— Windows 上斜杠/反斜杠混用会出问题
@@ -195,6 +213,7 @@ def api_turnstile():
         return jsonify({"ok": False, "error": "INTERNAL",
                         "message": f"{type(exc).__name__}: {exc}"}), 500
     finally:
+        _BUSY.clear()
         _lock.release()
 
 
@@ -220,10 +239,11 @@ def api_checkin():
         return jsonify({"ok": False, "error": "BAD_REQUEST",
                         "message": "需要 accessToken 或 username/password"}), 400
 
-    if not _lock.acquire(timeout=300):
+    if not _lock.acquire(timeout=LOCK_WAIT):
         return jsonify({"ok": False, "error": "BUSY",
                         "message": "浏览器忙，请稍后重试"}), 429
 
+    _BUSY.set()
     started = time.time()
     try:
         profile = os.path.join(PROFILE_DIR, profile_name)
@@ -256,6 +276,7 @@ def api_checkin():
         return jsonify({"ok": False, "error": "INTERNAL",
                         "message": f"{type(exc).__name__}: {exc}"}), 500
     finally:
+        _BUSY.clear()
         _lock.release()
 
 

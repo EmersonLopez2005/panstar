@@ -64,6 +64,50 @@ def check_network() -> None:
     print("     如果签到一直失败，先查这条。")
 
 
+def check_memory() -> None:
+    hr("【2.5】内存与 CPU（小内存机器必看）")
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            info = {}
+            for line in fh:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    info[k] = int(v.split()[0]) // 1024
+        total = info.get("MemTotal", 0)
+        avail = info.get("MemAvailable", 0)
+        swap_total = info.get("SwapTotal", 0)
+        swap_free = info.get("SwapFree", 0)
+        print(f"  内存: {avail} MB 可用 / {total} MB 总计")
+        print(f"  Swap: {swap_total - swap_free} MB 已用 / {swap_total} MB 总计")
+
+        try:
+            cores = os.cpu_count() or 1
+        except Exception:
+            cores = 1
+        print(f"  CPU 核心: {cores}")
+
+        # Camoufox（Firefox 定制版）单个实例常驻 300-500MB。
+        # 1 核 / 1GB 的机器上跑浏览器签到非常勉强，
+        # 一旦同时起两个浏览器实例就会 swap 抖动 —— CPU 100%、机器卡死。
+        if total and total < 1200:
+            print()
+            print("  ⚠️ 内存偏小（< 1.2GB），浏览器签到很可能失败或把机器拖死")
+            print("     建议：")
+            print("       - 换台内存 ≥ 2GB 的 VPS（推荐）")
+            print("       - 或加 2GB swap：")
+            print("         fallocate -l 2G /swapfile && chmod 600 /swapfile && \\")
+            print("         mkswap /swapfile && swapon /swapfile")
+            print("       - 或人工在浏览器里签到一次，脚本只查状态")
+        if cores and cores < 2:
+            print()
+            print("  ⚠️ 单核机器：浏览器操作会明显变慢，任务超时时间要放宽")
+        if swap_total and (swap_total - swap_free) > swap_total * 0.5:
+            print()
+            print("  ⚠️ Swap 已用超过一半 —— 内存已经不够用了")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ 读不到内存信息: {exc}")
+
+
 def check_disk() -> None:
     hr("【3】磁盘空间")
     try:
@@ -170,6 +214,7 @@ def main() -> int:
     skip_browser = "--skip-browser" in sys.argv
     check_system()
     check_network()
+    check_memory()
     check_disk()
     check_browser(skip=skip_browser)
     check_site()

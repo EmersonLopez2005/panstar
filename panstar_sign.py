@@ -266,6 +266,7 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
         print(f"[checkin] 服务端要求验证（{exc.code}），转浏览器流程")
 
     # 3b. 让浏览器代理直接在浏览器里完成整个签到（最接近真人操作）
+    agent_failed = False
     if result is None and agent_url:
         print("[checkin] 让浏览器代理直接完成签到")
         try:
@@ -283,11 +284,32 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
                 print(f"[checkin] 浏览器签到成功 → {summary}")
                 return {"status": "success", "summary": summary}
             print(f"[checkin] 浏览器签到未成功（flow={flow}）")
+            agent_failed = True
         except Exception as exc:
             print(f"[checkin] 浏览器代理签到失败: {exc}")
+            agent_failed = True
 
     # 3c. 退一步：让浏览器只拿 Turnstile token，主脚本自己走 preflight → 签到
+    #
+    # **小内存机器上绝不能在这里再起一个本地浏览器。**
+    # agent 刚才已经试过了，失败说明浏览器这条路本身有问题
+    # （内存不够 / CF 拦 / 引擎坏了）。此时再起第二个浏览器实例，
+    # 在 1 核 967MB 的机器上会直接 swap 抖动 —— 表现为 CPU 100%、
+    # 机器卡死、日志一行都出不来。
+    # 所以：agent 失败过就直接放弃浏览器路径，别把机器拖垮。
     if result is None:
+        if agent_failed:
+            raise PanstarError(
+                718,
+                "浏览器代理签到失败，且本机内存不足以再起一个浏览器。\n"
+                "  浏览器方案在当前机器上不可行。\n"
+                "  可选做法：\n"
+                "    1) 换台内存 ≥ 2GB 的 VPS（推荐，Camoufox 单实例就要 300-500MB）\n"
+                "    2) 扩内存：free -m 看 available，加 swap：\n"
+                "       fallocate -l 2G /swapfile && chmod 600 /swapfile && "
+                "mkswap /swapfile && swapon /swapfile\n"
+                "    3) 人工在服务器上用浏览器签到一次（一次性），脚本只查状态"
+            )
         token = get_turnstile_token(
             site_key=cfg("PS_TURNSITE_SITE_KEY", CHECKIN_SITE_KEY),
             url=f"{DOMAIN}/console/dashboard",
