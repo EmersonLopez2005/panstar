@@ -399,14 +399,43 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
                 profile=profile_name,
             )
             flow = (agent_result.get("flow") or "").upper()
-            if flow in ("SUCCESS", "CHECKED_IN", "ALREADY"):
-                status = client.checkin_status()
+            dialog = (agent_result.get("dialog") or "").strip()
+            print(f"[checkin] 浏览器 flow={flow or '(空)'}"
+                  + (f" dialog={dialog[:120]}" if dialog else ""))
+
+            # **以服务端状态为准，不靠 flow 字符串猜。**
+            #
+            # 前端 data-checkin-flow-state 的终态是 SUCCEEDED / FAILED，
+            # 早先这里写的是 ("SUCCESS", "CHECKED_IN", "ALREADY") ——
+            # 三个值前端都不存在，于是「签到成功」被当成失败上报。
+            #
+            # 只修字符串还不够：站点以后改状态名还会再错一次。
+            # 直接查今日签到状态，无论前端叫什么，服务端说签了就是签了。
+            status = client.checkin_status()
+            if status.get("checkedIn"):
                 summary = format_summary(status)
                 print(f"[checkin] 浏览器签到成功 → {summary}")
                 return {"status": "success", "summary": summary}
-            print(f"[checkin] 浏览器签到未成功（flow={flow}）")
+
+            if flow == "SUCCEEDED":
+                # 前端说成功、服务端说没签到 —— 可能结算有延迟，再查一次
+                time.sleep(3)
+                status = client.checkin_status()
+                if status.get("checkedIn"):
+                    summary = format_summary(status)
+                    print(f"[checkin] 浏览器签到成功（延迟结算）→ {summary}")
+                    return {"status": "success", "summary": summary}
+                agent_error = (
+                    f"浏览器流程显示成功（flow=SUCCEEDED），"
+                    f"但服务端仍显示未签到。dialog={dialog[:200] or '(空)'}"
+                )
+            else:
+                agent_error = (
+                    f"浏览器流程未完成（flow={flow or '(空)'}）。"
+                    f"dialog={dialog[:200] or '(空)'}"
+                )
+            print(f"[checkin] {agent_error}")
             agent_failed = True
-            agent_error = f"浏览器签到未成功（flow={flow}）"
         except AgentAuthError:
             # 鉴权失败是配置问题，直接抛出 —— 不要再被当成「内存不足」
             raise
@@ -428,17 +457,37 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
     # 所以：agent 失败过就直接放弃浏览器路径，别把机器拖垮。
     if result is None:
         if agent_failed:
-            raise PanstarError(
-                718,
-                f"浏览器代理签到失败：{agent_error}\n"
-                "  浏览器方案在当前机器上不可行。\n"
-                "  可选做法：\n"
-                "    1) 换台内存 ≥ 2GB 的 VPS（推荐，Camoufox 单实例就要 300-500MB）\n"
-                "    2) 扩内存：free -m 看 available，加 swap：\n"
-                "       fallocate -l 2G /swapfile && chmod 600 /swapfile && "
-                "mkswap /swapfile && swapon /swapfile\n"
-                "    3) 人工在服务器上用浏览器签到一次（一次性），脚本只查状态"
+            # **不要再一律说「内存不足、机器不可行」。**
+            # agent 失败的原因绝大多数跟内存无关（配置错、状态值判断错、
+            # 页面改版……）。笼统推给「硬件不行」会让人白换机器。
+            # 只有确认可用内存真的很低时才提机器规格。
+            avail = 0
+            try:
+                with open("/proc/meminfo", encoding="utf-8") as fh:
+                    for line in fh:
+                        if line.startswith("MemAvailable:"):
+                            avail = int(line.split()[1]) // 1024
+                            break
+            except Exception:
+                pass
+            low_mem = 0 < avail < 700
+            hint = f"浏览器代理签到失败：{agent_error}\n"
+            if low_mem:
+                hint += (
+                    f"  ⚠️ 当前可用内存仅 {avail} MB（Camoufox 需 300-500MB），"
+                    "机器规格可能是根因\n"
+                    "  可加 swap：\n"
+                    "    fallocate -l 2G /swapfile && chmod 600 /swapfile && "
+                    "mkswap /swapfile && swapon /swapfile\n"
+                )
+            hint += (
+                "  排查方向：\n"
+                "    1) 浏览器日志：journalctl -u panstar-agent -n 80 --no-pager\n"
+                "    2) 内存余量：  curl -s http://127.0.0.1:3000/health\n"
+                "    3) 配置自检：  python3 check_config.py\n"
+                "    4) 冒烟测试：  python3 smoke_test.py"
             )
+            raise PanstarError(718, hint)
         token = get_turnstile_token(
             site_key=cfg("PS_TURNSITE_SITE_KEY", CHECKIN_SITE_KEY),
             url=f"{DOMAIN}/console/dashboard",

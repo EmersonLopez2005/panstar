@@ -232,6 +232,54 @@ def test_playwright_api_signatures() -> None:
     check("Playwright API 参数个数正确", not problems, "; ".join(problems))
 
 
+def test_flow_state_names() -> None:
+    """签到流程状态值必须与站点前端一致。
+
+    真实踩过的坑：代码里写 ("SUCCESS", "CHECKED_IN", "ALREADY")，
+    而前端 data-checkin-flow-state 的终态其实是 SUCCEEDED / FAILED。
+    前两个根本不存在 →
+      1) 等待循环永远匹配不上，白等满 80 秒
+      2) 签到其实成功了，却被当成失败上报（"一个字母"浪费一整轮排查）
+
+    状态机来源（站点前端 bundle 里 C("XXX") 的调用，实测取得）：
+      IDLE → PREPARING_CHALLENGE → TOKEN_READY → PREFLIGHTING
+           → TICKET_READY → CHECKING_IN → SUCCEEDED / FAILED
+      另有 RETRYING。
+
+    这里断言：终态 SUCCEEDED 必须出现，且不存在「编造的状态名」。
+    """
+    print("【6】签到状态值一致性")
+
+    # 实测存在的状态
+    KNOWN = {
+        "IDLE", "PREPARING_CHALLENGE", "TOKEN_READY", "PREFLIGHTING",
+        "TICKET_READY", "CHECKING_IN", "RETRYING", "SUCCEEDED", "FAILED",
+    }
+    # 曾经误用的、前端不存在的名字
+    WRONG = {"SUCCESS", "CHECKED_IN", "ALREADY"}
+
+    targets = ["agent/panstar_agent.py", "panstar_sign.py"]
+    used_known, used_wrong = set(), []
+    for rel in targets:
+        path = os.path.join(APP_DIR, rel)
+        if not os.path.exists(path):
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)):
+                continue
+            v = node.value.strip()
+            if v in KNOWN:
+                used_known.add(v)
+            elif v in WRONG:
+                used_wrong.append(f"{rel}:{node.lineno} {v!r}")
+
+    check("终态 SUCCEEDED 已被使用", "SUCCEEDED" in used_known,
+          f"已用到的已知状态: {sorted(used_known) or '无'}")
+    check("没有使用前端不存在的状态名", not used_wrong, "; ".join(used_wrong))
+
+
 def main() -> int:
     print("=" * 62)
     print("冒烟测试")
@@ -241,6 +289,7 @@ def main() -> int:
     test_env_parsing()
     test_agent_helpers()
     test_playwright_api_signatures()
+    test_flow_state_names()
     print()
     if FAILED:
         print(f"❌ {len(FAILED)} 项失败：")

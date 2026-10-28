@@ -429,7 +429,20 @@ def _do_browser_checkin(page, username: str, password: str) -> Dict[str, Any]:
         """
     )
 
-    # 等结果
+    # 等结果。
+    #
+    # **状态值必须与站点前端一致**（从 bundle 里核实，不是猜的）。
+    # 前端 `data-checkin-flow-state` 的完整状态机：
+    #   IDLE → PREPARING_CHALLENGE → TOKEN_READY → PREFLIGHTING
+    #        → TICKET_READY → CHECKING_IN → SUCCEEDED / FAILED
+    #   另有 RETRYING。
+    # 其中 SUCCEEDED 和 FAILED 是终态。
+    #
+    # 早先这里写的是 ("SUCCESS", "CHECKED_IN", "ALREADY", "FAILED") ——
+    # 四个值里前三个前端根本不存在，于是永远匹配不上，
+    # 白白等满 40×2=80 秒才返回，而且把 SUCCEEDED（成功）
+    # 当成「未成功」报上去。一个字母之差，浪费了一整轮排查。
+    TERMINAL = ("SUCCEEDED", "FAILED")
     flow = ""
     for _ in range(40):
         time.sleep(2)
@@ -437,7 +450,7 @@ def _do_browser_checkin(page, username: str, password: str) -> Dict[str, Any]:
             "() => document.querySelector('[data-checkin-flow-state]')"
             "?.getAttribute('data-checkin-flow-state') || ''"
         )
-        if flow in ("SUCCESS", "CHECKED_IN", "ALREADY", "FAILED"):
+        if flow in TERMINAL:
             break
 
     dialog = page.evaluate(
