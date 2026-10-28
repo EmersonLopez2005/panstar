@@ -164,6 +164,16 @@ if [ -n "$CACHE_HOME" ]; then
   # 规范化成绝对路径再做比较 —— 直接比字符串会因为斜杠写法不同而漏判，
   # 结果又造出自环软链接。
   CACHE_HOME="$(cd "$CACHE_HOME" && pwd)"
+  # **非 ASCII 路径要提醒。**
+  # Firefox 的 native 代码路径处理、zip 解压、systemd 单元文件
+  # 都可能对中文/非 ASCII 路径出意外（乱码、找不到文件）。
+  # 能用就继续，但必须明确告知。
+  if ! printf '%s' "$CACHE_HOME" | LC_ALL=C grep -q '^[[:print:]]*$'; then
+    ylw "  ⚠️ 缓存路径含非 ASCII 字符：$CACHE_HOME"
+    echo "     Firefox / systemd 对中文路径可能出意外。"
+    echo "     建议改用纯英文路径，例如："
+    echo "       bash $APP_DIR/install_vps.sh --cache=/mnt/browser --no-cjk-fonts"
+  fi
   for target in "$HOME/.cache/camoufox" "$HOME/.cache/ms-playwright"; do
     name="$(basename "$target")"
     dest="$CACHE_HOME/$name"
@@ -326,6 +336,29 @@ PY
     grn "Camoufox 已安装（跳过下载）"
   else
     "$PY" -m camoufox fetch || true
+    # **GitHub API 限流的自动回退。**
+    # `camoufox fetch` 第一步是 _do_sync() → 打 api.github.com 查版本列表。
+    # 未认证的 API 调用每小时只有 60 次，VPS 共享 IP 常年被打满 →
+    #   403 Client Error: rate limit exceeded
+    #   Synced 0 versions from 0 repos.
+    #   v156.0.1-beta.36, the browser this camoufox release pairs with,
+    #   is not in official's releases.
+    # 但**真正的 zip 下载走 releases 地址，不受限流影响**，
+    # 而且版本是硬锁定的（browser-pin.json），URL 完全确定 →
+    # 用 fetch_camoufox.py 直接下载解压，绕开 API。
+    if ! "$PY" - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ.get("PS_APP_DIR", "."))
+try:
+    from browser_engine import engine_status
+    sys.exit(0 if engine_status().get("camoufox", {}).get("binary") else 1)
+except Exception:
+    sys.exit(1)
+PY
+    then
+      ylw "  常规 fetch 未成功，尝试绕过 GitHub API 限流直接下载"
+      PS_APP_DIR="$APP_DIR" "$PY" "$APP_DIR/fetch_camoufox.py" || true
+    fi
   fi
   # **必须校验本体是否真的落地。**
   # camoufox CLI 遇到下载失败会打印 Error 但仍以 0 退出，
@@ -347,20 +380,26 @@ PY
     echo ""
     echo "  最常见原因与对策："
     echo ""
-    echo "  A) ~/.cache/camoufox 是坏软链接（自环或断链）"
+    echo "  A) GitHub API 限流（最常见）"
+    echo "     → 症状：403 rate limit exceeded / Synced 0 versions from 0 repos"
+    echo "     → 绕过 API 直接下载（推荐，无需 token）："
+    echo "       $PY $APP_DIR/fetch_camoufox.py"
+    echo "     → 或者配 token（未认证 API 只有 60 次/小时，带 token 是 5000 次）："
+    echo "       export GITHUB_TOKEN=ghp_xxxx && $PY -m camoufox fetch"
+    echo ""
+    echo "  B) ~/.cache/camoufox 是坏软链接（自环或断链）"
     echo "     → mkdir(exist_ok=True) 遇到自环会抛 FileExistsError"
     echo "     一键修复："
     echo "       rm -f $HOME/.cache/camoufox $HOME/.cache/ms-playwright"
-    echo "       $PY -m camoufox fetch"
     echo ""
-    echo "  B) 临时目录空间不足（下载的 zip 落在 \$TMPDIR）"
+    echo "  C) 临时目录空间不足（下载的 zip 落在 \$TMPDIR）"
     echo "     → 当前 TMPDIR=$TMPDIR（可用 ${TMP_AVAIL_MB:-?} MB）"
-    echo "     修复：export TMPDIR=/大盘/tmp && mkdir -p \$TMPDIR && $PY -m camoufox fetch"
+    echo "     修复：export TMPDIR=/大盘/tmp && mkdir -p \$TMPDIR"
     echo ""
-    echo "  C) 网络问题 / GitHub 限流"
-    echo "     → 换个时间重试，或设置 GITHUB_TOKEN 后再试"
+    echo "  D) 网络问题"
+    echo "     → 换个时间重试，或换机器"
     echo ""
-    echo "  查看详细日志（上次 camoufox fetch 的完整输出）："
+    echo "  查看详细日志："
     echo "    cd $APP_DIR && $PY -m camoufox fetch"
     exit 1
   fi

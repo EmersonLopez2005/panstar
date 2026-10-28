@@ -121,6 +121,36 @@ fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /
 echo '/swapfile none swap sw 0 0' >> /etc/fstab
 ```
 
+## GitHub API 限流（VPS 常见）
+
+`camoufox fetch` 的第一步是查 GitHub release 列表，**未认证的 API 调用只有 60 次/小时**。
+VPS 的共享出口 IP 常年被打满，于是：
+
+```
+Official... Error: 403 Client Error: rate limit exceeded
+Synced 0 versions from 0 repos.
+v156.0.1-beta.36, the browser this camoufox release pairs with, is not in official's releases.
+```
+
+**但真正的 zip 下载走 releases 地址，不受限流影响**，而且版本是**硬锁定**的
+（camoufox 包里的 `browser-pin.json` 写死了它配对的浏览器版本）→ 下载 URL 完全确定。
+
+所以直接用自带的直装脚本绕开 API，**不需要 token**：
+
+```bash
+python fetch_camoufox.py
+```
+
+它做的事：读 `browser-pin.json` → 拼出 releases 下载地址 → 流式下载（支持断点续传）
+→ 解压到 `browsers/{repo}/{version}-{build}/` → 写好 `version.json` / `config.json` / `.0.5_FLAG`
+→ 校验浏览器本体确实就位。
+
+安装脚本已经接上这个回退：常规 `camoufox fetch` 失败后会自动尝试它。
+
+> 如果你有 GitHub token，也可以直接用（5000 次/小时）：
+> `export GITHUB_TOKEN=ghp_xxxx && python -m camoufox fetch`
+> token 建议只给 `public_repo` 读权限。
+
 ## 排错
 
 ```bash
@@ -188,6 +218,8 @@ Camoufox 的真实开销是 **峰值约 2.6GB**（下载包 ~1.2GB 和解压后�
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | **CPU 100%、机器卡死、日志一行不出** | **内存不足导致 swap 抖动** —— 两个浏览器实例抢 1 核 / 1GB | 加 swap（见上）；或换 ≥2GB 的机器；新版已限制"不叠加第二个浏览器" |
+| `403 rate limit exceeded` / `Synced 0 versions from 0 repos` | **GitHub API 限流** —— 未认证的 API 调用只有 60 次/小时，VPS 共享 IP 常被打满 | `python fetch_camoufox.py`（绕开 API，**无需 token**）；或设 `GITHUB_TOKEN` |
+| `v156.0.1-beta.36 ... is not in official's releases` | 同上（限流导致查不到版本列表） | 同上 |
 | `No space left on device`（但 `df` 显示空间充足） | **camoufox 把下载的 zip 落在 `$TMPDIR`/`/tmp`**，很多 VPS 的 `/tmp` 是小 tmpfs（内存盘） | `export TMPDIR=/大盘/tmp && mkdir -p $TMPDIR` 再重装；安装脚本会自动检测并提示 |
 | `FileExistsError: [Errno 17] File exists: '.../camoufox'` | `~/.cache/camoufox` 是坏软链接（自环或断链） | `rm -f ~/.cache/camoufox ~/.cache/ms-playwright`（新版脚本会自动清） |
 | 下载到一半 ENOSPC | 同上 | 同上 |
@@ -195,7 +227,7 @@ Camoufox 的真实开销是 **峰值约 2.6GB**（下载包 ~1.2GB 和解压后�
 | `ModuleNotFoundError: flask`（agent 起不来） | 只装了主 requirements，漏了 agent 依赖 | 已修：安装脚本现在会装 `agent/requirements.txt` |
 | `crontab: command not found` | Debian 精简安装没有 cron | 已修：安装脚本会自动 `apt-get install cron` |
 | 清理完磁盘一点没释放 | 大头不在 apt/Docker/日志里 | `bash cleanup_disk.sh` 看全盘 Top 15，或 `du -xh --max-depth=1 / \| sort -h \| tail -15` |
-| `没有可用的浏览器引擎` | pip 装了包但浏览器本体没下载 | `python -m camoufox fetch`（约 1.2GB） |
+| `没有可用的浏览器引擎` | pip 装了包但浏览器本体没下载 | `python -m camoufox fetch`（约 1.2GB）或 `python fetch_camoufox.py` |
 | 装好了却说找不到浏览器 | `--cache=` 装到了大盘，但 cron 环境没带上变量 | 重新跑 `install_vps.sh --cache=...`（会写进 `.env`），或直接 `export XDG_CACHE_HOME=...` |
 | `[agent] 不可用` | agent 没启动 | `systemctl start panstar-agent` 或 `cd agent && docker compose up -d` |
 | `Task was destroyed but it is pending!` | 浏览器启动失败的 asyncio 残留噪音 | 已静音，不是错误 |
