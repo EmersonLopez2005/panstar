@@ -193,6 +193,56 @@ def check_browser(skip: bool = False) -> None:
         print(f"  ❌ 检查引擎失败: {exc}")
 
 
+def check_agent_service() -> None:
+    """浏览器代理服务健康度 —— 重点查「是不是被 OOM 杀过」。"""
+    hr("【4.5】浏览器代理服务")
+    import subprocess
+
+    def run(cmd: list) -> str:
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=10).stdout.strip()
+        except Exception:
+            return ""
+
+    active = run(["systemctl", "is-active", "panstar-agent"])
+    print(f"  服务状态: {active or '(未知)'}")
+    if active != "active":
+        print("  ⚠️ agent 没在跑： systemctl start panstar-agent")
+        return
+
+    restarts = run(["systemctl", "show", "panstar-agent", "-p", "NRestarts"])
+    n = restarts.split("=", 1)[1] if "=" in restarts else "?"
+    if n.isdigit() and int(n) > 0:
+        print(f"  ⚠️ 重启过 {n} 次 —— 很可能被 OOM 杀过")
+    else:
+        print(f"  重启次数: {n}")
+
+    mem_max = run(["systemctl", "show", "panstar-agent", "-p", "MemoryMax"])
+    if "=" in mem_max:
+        v = mem_max.split("=", 1)[1].strip()
+        if v.isdigit():
+            mb = int(v) // (1024 * 1024)
+            print(f"  内存上限: {mb} MB")
+            # Camoufox 的完整进程树（Xvfb + Firefox 各进程）峰值 700-900MB
+            if mb < 1000:
+                print("  ⚠️ 上限偏小 —— Camoufox 进程树峰值约 700-900MB，"
+                      "跑起来很容易被 OOM 杀掉")
+                print("     修复：重跑安装脚本（会按物理内存动态计算）")
+                print("     应急：systemctl set-property panstar-agent "
+                      "MemoryMax=1500M && systemctl restart panstar-agent")
+
+    # 翻 journal 找 OOM 痕迹
+    logs = run(["journalctl", "-u", "panstar-agent", "-n", "200", "--no-pager"])
+    hits = [ln for ln in logs.splitlines()
+            if any(k in ln.lower() for k in ("oom", "killed", "memorymax",
+                                             "out of memory"))]
+    if hits:
+        print("  ⚠️ 日志里有 OOM/被杀痕迹：")
+        for ln in hits[-3:]:
+            print(f"     {ln.strip()[:110]}")
+
+
 def check_site() -> None:
     hr("【5】站点连通")
     try:
@@ -217,6 +267,7 @@ def main() -> int:
     check_memory()
     check_disk()
     check_browser(skip=skip_browser)
+    check_agent_service()
     check_site()
     hr("体检结束")
     print("  下一步：编辑 .env 填账号，然后 bash run_sign.sh --now")

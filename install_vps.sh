@@ -621,17 +621,41 @@ Environment=PLAYWRIGHT_BROWSERS_PATH=$CACHE_HOME/ms-playwright"
     AGENT_CACHE_ENV="$AGENT_CACHE_ENV
 Environment=TMPDIR=$TMPDIR"
   fi
-  # 资源上限：浏览器只在跑挑战那几十秒吃内存，平时 agent 只有几十 MB。
-  # 但 1 核 / 1GB 的小机器上，不加限制会直接把整机拖进 swap 抖动。
-  AGENT_LIMITS="MemoryMax=700M
-MemorySwapMax=1G
-TasksMax=256"
-  if [ "$LOW_MEMORY" = "1" ]; then
-    # 小内存机器：给得更紧，宁可浏览器 OOM 重启也不要整机卡死
-    AGENT_LIMITS="MemoryMax=600M
-MemorySwapMax=1G
-TasksMax=128
-OOMPolicy=stop"
+  # 资源上限。
+  #
+  # **不能拍一个固定值。** 之前写死 MemoryMax=700M / TasksMax=256，
+  # 结果是 agent 在跑到一半时被 systemd OOM 杀掉 ——
+  # 表现为主脚本收到 RemoteDisconnected（连接被掐断），
+  # 而不是任何 Python 异常，极难往「内存限制」上想。
+  #
+  # 关键是 cgroup 限制算的是**整个进程树**：
+  #   Python(agent) + Xvfb + Firefox 主进程 + Firefox 各内容进程 ≈ 700-900MB
+  # 700M 根本装不下。TasksMax=256 同理 —— Firefox 线程数很容易超。
+  if [ "$ENGINE" = "patchright" ]; then
+    # Chromium 略轻
+    AGENT_MEM_MB=$(( MEM_TOTAL_MB * 50 / 100 ))
+    [ "$AGENT_MEM_MB" -lt 900 ] && AGENT_MEM_MB=900
+  else
+    # Camoufox(Firefox)：单实例 300-500MB，加 Xvfb/Python 峰值 700-900MB
+    AGENT_MEM_MB=$(( MEM_TOTAL_MB * 65 / 100 ))
+    [ "$AGENT_MEM_MB" -lt 1200 ] && AGENT_MEM_MB=1200
+  fi
+  # 不超过物理内存
+  [ "$AGENT_MEM_MB" -gt "${MEM_TOTAL_MB:-$AGENT_MEM_MB}" ] && \
+    AGENT_MEM_MB="${MEM_TOTAL_MB}"
+  AGENT_MEM_HIGH=$(( AGENT_MEM_MB * 85 / 100 ))
+
+  # MemoryHigh = 软上限：到了先限速/回收，不会直接杀
+  # MemoryMax  = 硬上限：到这个才杀
+  # TasksMax    = 4096，Firefox 线程多，256 必炸
+  # 不给 OOMPolicy=stop —— 让 Restart=always 正常重启
+  AGENT_LIMITS="MemoryHigh=${AGENT_MEM_HIGH}M
+MemoryMax=${AGENT_MEM_MB}M
+MemorySwapMax=2G
+TasksMax=4096"
+  echo "  agent 资源上限: MemoryMax=${AGENT_MEM_MB}M（MemoryHigh=${AGENT_MEM_HIGH}M）"
+  if [ "${AGENT_MEM_MB}" -ge "${MEM_TOTAL_MB:-9999}" ] 2>/dev/null; then
+    ylw "  ⚠️ 内存上限等于物理内存，OOM 时可能触发整机 OOM killer 而不是只杀 agent"
   fi
   cat > /etc/systemd/system/panstar-agent.service <<EOF
 [Unit]

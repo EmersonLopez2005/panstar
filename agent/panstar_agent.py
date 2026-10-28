@@ -84,6 +84,39 @@ def _busy_state() -> Dict[str, Any]:
         "lock_wait": LOCK_WAIT,
     }
 
+
+def _cgroup_mem() -> Dict[str, Any]:
+    """当前 cgroup 的内存使用与上限（MB）。
+
+    为什么需要：agent 被 systemd 按 MemoryMax 杀掉时，
+    主脚本只会看到 RemoteDisconnected（连接被掐断），
+    完全看不出是内存问题。把 cgroup 用量暴露到 /health，
+    就能在跑之前/之后直接看到还剩多少余量。
+    """
+    info: Dict[str, Any] = {}
+    try:
+        rel = ""
+        with open("/proc/self/cgroup", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("0::"):
+                    rel = line.strip().split("::", 1)[1]
+                    break
+        if not rel:
+            return info
+        base = os.path.join("/sys/fs/cgroup", rel.lstrip("/"))
+        for key, fname in (("current", "memory.current"),
+                           ("max", "memory.max"),
+                           ("peak", "memory.peak")):
+            try:
+                raw = open(os.path.join(base, fname), encoding="utf-8").read().strip()
+                if raw.isdigit():
+                    info[key + "_mb"] = int(raw) // (1024 * 1024)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return info
+
 app.logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
 
@@ -170,6 +203,7 @@ def health():
         "proxy": bool(PROXY),
         "domain": DOMAIN,
         "busy": state["busy"],
+        "mem": _cgroup_mem(),
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
     })
 
@@ -431,4 +465,8 @@ if __name__ == "__main__":
     if not AGENT_TOKEN:
         print("[agent] ⚠️ 未设置 AGENT_TOKEN，任何人都能调用本服务（仅限内网）",
               flush=True)
-    app.run(host=AGENT_HOST, port=AGENT_PORT, threaded=False)
+    # threaded=True：跑浏览器会占用一个请求几十秒到几分钟，
+    # 单线程模式下 /health、/auth-check 也会被一起堵住 ——
+    # 于是健康检查超时，误判成「agent 不可用」。
+    # 并发由 _lock 保证（同一时间只跑一个浏览器），多线程只是让轻量接口能插队。
+    app.run(host=AGENT_HOST, port=AGENT_PORT, threaded=True)

@@ -199,6 +199,45 @@ class AgentAuthError(Exception):
     """
 
 
+class AgentCrashedError(Exception):
+    """浏览器代理进程在请求处理中挂了。
+
+    典型表现：requests 抛
+      ('Connection aborted.', RemoteDisconnected('Remote end closed connection...'))
+    这不是 Python 异常，是 **HTTP 连接被对端掐断** ——
+    说明 agent 进程死了（最常见是被 systemd 按 MemoryMax 杀掉），
+    而不是浏览器或 Cloudflare 的问题。
+
+    单独一个类型，是为了把「进程被杀」和「业务失败」区分开：
+    前者要去看 journalctl / 调内存上限，后者才要调浏览器逻辑。
+    """
+
+
+def _explain_conn_error(agent_url: str, exc: Exception) -> str:
+    """把连接类异常翻译成可执行的排查方向。"""
+    raw = str(exc)
+    if "RemoteDisconnected" in raw or "Connection aborted" in raw:
+        return (
+            "浏览器代理进程在处理请求时挂掉了（连接被掐断）。\n"
+            "  这不是 Python 异常，也不是浏览器/Cloudflare 的问题 ——\n"
+            "  最常见原因是 agent 被 systemd 按内存上限 OOM 杀掉。\n"
+            "\n"
+            "  确认是不是 OOM：\n"
+            f"    systemctl show panstar-agent -p NRestarts\n"
+            f"    journalctl -u panstar-agent -n 100 --no-pager | grep -iE 'oom|killed|memory'\n"
+            f"    curl -s {agent_url.rstrip('/')}/health   # 看 mem.current_mb / mem.max_mb\n"
+            "\n"
+            "  修复：重跑安装脚本，它会按物理内存动态计算上限\n"
+            "  （旧版写死 MemoryMax=700M，对 Firefox 太小）：\n"
+            "    cd ~/panstar && git pull && bash install_vps.sh --agent\n"
+            "\n"
+            "  应急：临时放宽上限\n"
+            "    systemctl set-property panstar-agent MemoryMax=1500M\n"
+            "    systemctl restart panstar-agent"
+        )
+    return f"访问浏览器代理失败：{type(exc).__name__}: {raw}"
+
+
 def agent_checkin(agent_url: str, agent_token: str, access_token: str = "",
                   refresh_token: str = "", username: str = "",
                   password: str = "", profile: str = "default",
@@ -222,12 +261,19 @@ def agent_checkin(agent_url: str, agent_token: str, access_token: str = "",
         body["username"] = username
         body["password"] = password
 
-    resp = requests.post(
-        f"{agent_url.rstrip('/')}/checkin",
-        headers=headers,
-        json=body,
-        timeout=timeout,
-    )
+    try:
+        resp = requests.post(
+            f"{agent_url.rstrip('/')}/checkin",
+            headers=headers,
+            json=body,
+            timeout=timeout,
+        )
+    except requests.exceptions.ConnectionError as exc:
+        raise AgentCrashedError(_explain_conn_error(agent_url, exc)) from exc
+    except requests.exceptions.RequestException as exc:
+        raise AgentCrashedError(
+            f"访问浏览器代理失败：{type(exc).__name__}: {exc}"
+        ) from exc
     try:
         data = resp.json()
     except Exception:
@@ -363,6 +409,9 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
             agent_error = f"浏览器签到未成功（flow={flow}）"
         except AgentAuthError:
             # 鉴权失败是配置问题，直接抛出 —— 不要再被当成「内存不足」
+            raise
+        except AgentCrashedError:
+            # agent 进程挂了，信息本身已经说清原因和排查步骤，直接抛出
             raise
         except Exception as exc:
             print(f"[checkin] 浏览器代理签到失败: {exc}")
