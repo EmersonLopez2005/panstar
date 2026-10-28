@@ -3,7 +3,7 @@
 ## 快速开始（Debian 12/13、Ubuntu 22.04+）
 
 ```bash
-git clone <这个仓库> panstar-autosign && cd panstar-autosign
+it clone https://github.com/EmersonLopez2005/panstar.git && cd panstar
 
 # 装依赖 + 浏览器 + venv（Camoufox 约 1.3GB，下载慢是正常的）
 bash install_vps.sh --agent
