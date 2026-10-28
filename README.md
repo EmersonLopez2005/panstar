@@ -221,8 +221,8 @@ Camoufox 的真实开销是 **峰值约 2.6GB**（下载包 ~1.2GB 和解压后�
 |---|---|---|
 | 定位大头 | `bash cleanup_disk.sh` | 扫全盘 Top 15，直接告诉你空间在哪 |
 | 清理 | `bash cleanup_disk.sh --clean` | apt 缓存、旧内核、Docker 悬空镜像、journald |
-| **换大盘放内核** | `bash install_vps.sh --cache=/mnt/大硬盘` | **最有效**，浏览器内核挪到另一块盘 |
-| **修 /tmp 是小 tmpfs** | `export TMPDIR=/mnt/大硬盘/tmp` | camoufox 的 zip 落在 `$TMPDIR`，不改这个照样 ENOSPC |
+| **换大盘放内核** | `bash install_vps.sh --cache=/mnt/browser` | **最有效**，浏览器内核挪到另一块盘 |
+| **修 /tmp 是小 tmpfs** | `export TMPDIR=/mnt/browser/tmp` | camoufox 的 zip 落在 `$TMPDIR`，不改这个照样 ENOSPC |
 | 换轻量引擎 | `bash install_vps.sh --engine=patchright` | 约 400MB，但过 CF 成功率较低 |
 | 省中文字体 | `bash install_vps.sh --no-cjk-fonts` | 省约 250MB（页面可能显示方框） |
 | 硬装 | `bash install_vps.sh --force` | 跳过空间检查（可能中途失败） |
