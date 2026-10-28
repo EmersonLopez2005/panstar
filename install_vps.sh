@@ -455,8 +455,78 @@ if [ "$MODE" = "--agent" ]; then
   #   - .env 里已有 LOGIN_AGENT_TOKEN → 沿用它
   #   - 没有 → 生成一个并写进 .env
   # systemd 单元通过 EnvironmentFile 读取，两边永远一致。
+  #
+  # **注意去重**：.env 里同一个键出现多次时，
+  # 只有最后一个非空值会生效（load_env_file 的规则）。
+  # 早先 .env.example 自带了一行空的 `LOGIN_AGENT_TOKEN=`，
+  # 如果用户把真值写在它后面，那一行空值会让真值「看不见」——
+  # 而看文件内容完全正常，只有运行时才知道被丢了。
+  # 所以这里统一把重复键清理掉，只保留一行。
+  #
+  # 去重规则（很关键，写错过一次）：
+  #   保留**最后一个非空值**所在的那一行原文，其余同键的行删掉。
+  #   不能"重建"整行 —— 那会把注释、引号形式、用户自己的排版全弄丢，
+  #   甚至把没碰过的键也清空（踩过一次：PS_USER_PASS 被清成空）。
+  if [ -f "$APP_DIR/.env" ]; then
+    DUP_COUNT="$("$PY" - "$APP_DIR/.env" <<'PY'
+import sys
+from collections import Counter
+path = sys.argv[1]
+keys = []
+with open(path, encoding="utf-8") as fh:
+    for raw in fh:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        keys.append(line.split("=", 1)[0].strip())
+print(len([k for k, n in Counter(keys).items() if n > 1]))
+PY
+)"
+    if [ "${DUP_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+      ylw "  .env 里有 $DUP_COUNT 个重复的键，正在清理（保留最后一个非空值）"
+      "$PY" - "$APP_DIR/.env" <<'PY'
+import sys
+from collections import OrderedDict
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    lines = fh.readlines()
+
+# 每个键 → 最后一个非空值所在行的原文
+best = {}
+for idx, raw in enumerate(lines):
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    key = key.strip()
+    if value.strip():
+        best[key] = idx
+
+out, seen = [], set()
+for idx, raw in enumerate(lines):
+    line = raw.strip()
+    if line and not line.startswith("#") and "=" in line:
+        key = line.split("=", 1)[0].strip()
+        if key in seen:
+            continue                      # 重复键的后续行丢掉
+        if key in best and best[key] != idx:
+            # 这是一个旧行（值为空），真正的值在后面 —— 先跳过，
+            # **但不要标记 seen**，否则后面那个有值的行会被误当成重复行丢掉。
+            continue
+        seen.add(key)
+        out.append(raw if raw.endswith("\n") else raw + "\n")
+        continue
+    out.append(raw if raw.endswith("\n") else raw + "\n")
+
+with open(path, "w", encoding="utf-8") as fh:
+    fh.writelines(out)
+PY
+      grn "  已清理完成"
+    fi
+  fi
+
   if [ -f "$APP_DIR/.env" ] && grep -qE '^LOGIN_AGENT_TOKEN=.+' "$APP_DIR/.env"; then
-    AGENT_TOKEN_VALUE="$(grep -E '^LOGIN_AGENT_TOKEN=' "$APP_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"' ')"
+    AGENT_TOKEN_VALUE="$(grep -E '^LOGIN_AGENT_TOKEN=' "$APP_DIR/.env" | tail -1 | cut -d= -f2- | tr -d '"'"'"' ')"
     ylw "  沿用 .env 里已有的 LOGIN_AGENT_TOKEN"
   else
     AGENT_TOKEN_VALUE="$("$PY" - <<'PY'
@@ -477,12 +547,49 @@ PY
     grn "  已生成新 token 并写入 .env"
   fi
   # 代理地址也一并写进 .env，免得用户还要手动填地址
+  # （同样不能用"重建整行"的写法 —— 那会把用户的其他配置弄丢；
+  #  也不能只处理重复键 —— 只有一个空值行时也要就地替换）
   if [ -f "$APP_DIR/.env" ]; then
-    if grep -qE '^LOGIN_AGENT_URL=' "$APP_DIR/.env"; then
-      sed -i "s|^LOGIN_AGENT_URL=.*|LOGIN_AGENT_URL=http://127.0.0.1:3000|" "$APP_DIR/.env"
-    else
-      printf 'LOGIN_AGENT_URL=http://127.0.0.1:3000\n' >> "$APP_DIR/.env"
-    fi
+    "$PY" - "$APP_DIR/.env" <<'PY'
+import sys
+path = sys.argv[1]
+NEW_URL = "http://127.0.0.1:3000"
+with open(path, encoding="utf-8") as fh:
+    lines = fh.readlines()
+
+# 用户自己填的非空地址优先
+user_url = ""
+for raw in lines:
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    if key.strip() == "LOGIN_AGENT_URL" and value.strip():
+        user_url = value.strip()
+        break
+
+final_url = user_url or NEW_URL
+out, seen = [], set()
+for raw in lines:
+    line = raw.strip()
+    if line and not line.startswith("#") and "=" in line:
+        key = line.split("=", 1)[0].strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        if key == "LOGIN_AGENT_URL":
+            out.append(f"LOGIN_AGENT_URL={final_url}\n")
+        else:
+            out.append(raw if raw.endswith("\n") else raw + "\n")
+        continue
+    out.append(raw if raw.endswith("\n") else raw + "\n")
+
+if "LOGIN_AGENT_URL" not in seen:
+    out.append(f"LOGIN_AGENT_URL={final_url}\n")
+
+with open(path, "w", encoding="utf-8") as fh:
+    fh.writelines(out)
+PY
   fi
 
   # 缓存路径：--cache= 指定的大盘，或默认 ~/.cache

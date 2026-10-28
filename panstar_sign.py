@@ -44,7 +44,17 @@ LOG_DIR = os.path.join(APP_DIR, "logs")
 # .env 读取
 # --------------------------------------------------------------------------
 def load_env_file(path: str = ENV_FILE) -> None:
-    """把 .env 里的键值读进 os.environ（已存在的环境变量优先，不覆盖）。"""
+    """把 .env 里的键值读进 os.environ。
+
+    规则：
+      1. 已在环境里的**非空**变量优先，不被 .env 覆盖
+         （cron/手动 export 的优先级最高）
+      2. **空值不占位** —— 否则 .env 里先出现的 `LOGIN_AGENT_TOKEN=`
+         （.env.example 自带的一行）会把后面真正填入的值挡掉，
+         导致实际生效的是空字符串 → agent 返回 401「token 不正确」。
+         这正是之前踩的坑。
+      3. 同一个键出现多次时，**最后一个非空值生效**。
+    """
     if not os.path.exists(path):
         return
     with open(path, encoding="utf-8") as fh:
@@ -55,8 +65,16 @@ def load_env_file(path: str = ENV_FILE) -> None:
             key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
+            if not key:
+                continue
+            if not value:
+                # 空值不写进 os.environ，也不阻止后续赋值
+                continue
+            existing = os.environ.get(key, "")
+            if existing and existing.strip():
+                # 外部环境变量已有非空值 —— 保持不动
+                continue
+            os.environ[key] = value
 
 
 def cfg(name: str, default: str = "") -> str:
