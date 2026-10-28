@@ -93,8 +93,28 @@ fi
 
 # ---------------------------------------------------------------- 浏览器内核
 hr "浏览器内核（Camoufox 约 1.3GB）"
-for d in "$HOME/.cache/camoufox" "$HOME/.cache/ms-playwright" "$HOME/.cache/patchright"; do
-  if [ -d "$d" ]; then
+for d in "$HOME/.cache/camoufox" "$HOME/.cache/ms-playwright"; do
+  if [ -L "$d" ]; then
+    # 坏软链接（自环 / 断链）：这种会让 camoufox 的
+    # INSTALL_DIR.mkdir(parents=True, exist_ok=True) 抛
+    #   FileExistsError: [Errno 17] File exists
+    # 因为自环的 is_dir() 因 ELOOP 返回 False，exist_ok=True 也救不了。
+    if [ ! -d "$d" ]; then
+      raw="$(readlink "$d" 2>/dev/null || true)"
+      self="$(cd "$(dirname "$d")" && pwd)/$(basename "$d")"
+      case "$raw" in
+        /*) dest="$raw" ;;
+        *)  dest="$(dirname "$d")/$raw" ;;
+      esac
+      echo "  $d  → 坏软链接（指向 $raw）"
+      if [ "$CLEAN" = "1" ]; then
+        rm -f "$d"
+        echo "    已删除坏软链接（这条会一直让 camoufox fetch 失败）"
+      fi
+    else
+      echo "  $d  ($(sz_of "$d")) → $(readlink "$d")"
+    fi
+  elif [ -d "$d" ]; then
     echo "  $d  ($(sz_of "$d"))"
     if [ "$CLEAN" = "1" ]; then
       rm -rf "$d"

@@ -47,6 +47,37 @@ grn()  { printf '\033[32m%s\033[0m\n' "$*"; }
 ylw()  { printf '\033[33m%s\033[0m\n' "$*"; }
 step() { printf '\n\033[36m==> %s\033[0m\n' "$*"; }
 
+# ---------------------------------------------------------------- 坏软链接修复
+# **判断依据：是个软链接，但 `-d`（is_dir）为假 → 自环或断链 → 删掉。**
+#
+# 为什么必须修：自环软链接（~/.cache/camoufox -> ~/.cache/camoufox）会让
+# camoufox 的 INSTALL_DIR.mkdir(parents=True, exist_ok=True) 抛
+#   FileExistsError: [Errno 17] File exists: '/root/.cache/camoufox'
+# 因为 pathlib 判断「已存在且是目录」用的是 is_dir()，而自环的 is_dir()
+# 会因 ELOOP 返回 False，于是 exist_ok=True 也救不了。
+# 一次坏链接能让之后每一次 camoufox fetch 都失败 —— 必须无条件清理。
+repair_broken_links() {
+  local target="$1"
+  [ -L "$target" ] || return 0
+  if [ ! -d "$target" ]; then
+    rm -f "$target"
+    ylw "  已移除损坏的软链接：$target"
+    return 0
+  fi
+  # 是软链接且指向有效目录 → 再查是不是指回自己
+  local raw dest self
+  raw="$(readlink "$target" 2>/dev/null || true)"
+  case "$raw" in
+    /*) dest="$raw" ;;
+    *)  dest="$(dirname "$target")/$raw" ;;
+  esac
+  self="$(cd "$(dirname "$target")" && pwd)/$(basename "$target")"
+  if [ "$dest" = "$self" ]; then
+    rm -f "$target"
+    ylw "  已移除自环软链接：$target"
+  fi
+}
+
 # ---------------------------------------------------------------- 前置检查
 if [ "$(id -u)" != "0" ] && ! command -v sudo >/dev/null 2>&1; then
   red "需要 root 或 sudo"
@@ -138,19 +169,9 @@ if [ -n "$CACHE_HOME" ]; then
     ln -sfn "$dest" "$target"
     echo "  $target -> $dest"
   done
-  # **自环校验**：软链接指回自己会让 mkdir(exist_ok=True) 抛 FileExistsError
-  # （is_dir() 因 ELOOP 返回 False），camoufox 直接崩。
-  # 这里再查一遍，不放心就干脆删掉链接改成真实目录。
+  # 建完再统一体检一次，确保没有自环残留
   for target in "$HOME/.cache/camoufox" "$HOME/.cache/ms-playwright"; do
-    if [ -L "$target" ]; then
-      link_dest="$(readlink -f "$target" 2>/dev/null || true)"
-      link_self="$(cd "$(dirname "$target")" && pwd)/$(basename "$target")"
-      if [ -z "$link_dest" ] || [ "$link_dest" = "$link_self" ]; then
-        rm -f "$target"
-        mkdir -p "$target"
-        ylw "  已移除异常软链接，改为真实目录：$target"
-      fi
-    fi
+    repair_broken_links "$target"
   done
   # **必须在这里 export，不能只写进 .env。**
   # camoufox 的 INSTALL_DIR = Path(user_cache_dir("camoufox"))，
@@ -219,6 +240,20 @@ grn "Python 依赖就绪（含 agent 依赖）"
 # ---------------------------------------------------------------- 浏览器
 step "安装浏览器内核（$ENGINE）"
 
+# ---------------------------------------------------------------- 清理坏软链接
+# **这一步必须无条件执行，不能只在传了 --cache 时才做。**
+#
+# 历史 bug：早期版本在 --cache 指向 $HOME/.cache 时造出过自环软链接
+# （~/.cache/camoufox -> ~/.cache/camoufox）。那种链接一旦留在机器上，
+# 之后每次 camoufox fetch 都会在 INSTALL_DIR.mkdir(exist_ok=True) 处炸：
+#   FileExistsError: [Errno 17] File exists: '/root/.cache/camoufox'
+# 因为自环软链接的 is_dir() 因 ELOOP 返回 False，pathlib 判定「不是目录」，
+# 于是重新抛出 FileExistsError。删掉坏链接即可恢复。
+for t in "$HOME/.cache/camoufox" "$HOME/.cache/ms-playwright"; do
+  repair_broken_links "$t"
+done
+
+# ---------------------------------------------------------------- TMPDIR
 # **TMPDIR 必须是关键变量。**
 # camoufox 内部用 `tempfile.NamedTemporaryFile()`（不指定 dir）来存下载的 zip，
 # 也就是落在 `$TMPDIR` 或 `/tmp`。
@@ -257,7 +292,22 @@ fi
 
 if [ "$ENGINE" = "camoufox" ]; then
   "$PY" -m pip install "camoufox[geoip]" --quiet
-  "$PY" -m camoufox fetch || true
+  # 已经装好就别重下 1.2GB —— 反复重跑安装脚本时能省十几分钟。
+  PRE_INSTALLED="$(PS_APP_DIR="$APP_DIR" "$PY" - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ.get("PS_APP_DIR", "."))
+try:
+    from browser_engine import engine_status
+    print("1" if engine_status().get("camoufox", {}).get("binary") else "0")
+except Exception:
+    print("0")
+PY
+)"
+  if [ "$PRE_INSTALLED" = "1" ]; then
+    grn "Camoufox 已安装（跳过下载）"
+  else
+    "$PY" -m camoufox fetch || true
+  fi
   # **必须校验本体是否真的落地。**
   # camoufox CLI 遇到下载失败会打印 Error 但仍以 0 退出，
   # 只看退出码会把「下载失败」误判成「安装成功」。
@@ -274,14 +324,25 @@ except Exception as exc:
 PY
 )"
   if [ "$VERIFY" != "1" ]; then
-    red "  ❌ Camoufox 浏览器本体没装上（下载失败或空间不足）"
+    red "  ❌ Camoufox 浏览器本体没装上"
     echo ""
-    echo "  手动重试（记得先确认 TMPDIR 指向大盘）："
-    echo "    export TMPDIR=/mnt/你的大盘/tmp && mkdir -p \$TMPDIR"
-    echo "    $PY -m camoufox fetch"
+    echo "  最常见原因与对策："
     echo ""
-    echo "  查看到底差多少："
-    echo "    df -h $TMPDIR $HOME/.cache"
+    echo "  A) ~/.cache/camoufox 是坏软链接（自环或断链）"
+    echo "     → mkdir(exist_ok=True) 遇到自环会抛 FileExistsError"
+    echo "     一键修复："
+    echo "       rm -f $HOME/.cache/camoufox $HOME/.cache/ms-playwright"
+    echo "       $PY -m camoufox fetch"
+    echo ""
+    echo "  B) 临时目录空间不足（下载的 zip 落在 \$TMPDIR）"
+    echo "     → 当前 TMPDIR=$TMPDIR（可用 ${TMP_AVAIL_MB:-?} MB）"
+    echo "     修复：export TMPDIR=/大盘/tmp && mkdir -p \$TMPDIR && $PY -m camoufox fetch"
+    echo ""
+    echo "  C) 网络问题 / GitHub 限流"
+    echo "     → 换个时间重试，或设置 GITHUB_TOKEN 后再试"
+    echo ""
+    echo "  查看详细日志（上次 camoufox fetch 的完整输出）："
+    echo "    cd $APP_DIR && $PY -m camoufox fetch"
     exit 1
   fi
   grn "Camoufox 就绪（浏览器本体已确认存在）"
