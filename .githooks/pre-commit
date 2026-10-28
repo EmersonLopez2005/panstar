@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# 提交前自动跑冒烟测试。
+#
+# 为什么要这个：py_compile 只能查语法，查不出「语法合法但语义错误」的 bug。
+# 真实案例：_memory_mb() 被误加 @contextmanager 装饰器，语法完全合法，
+# 但运行时返回的对象类型不对 —— 而且只在部署到 VPS 上才暴露。
+# 有了这个 hook，这类错误在 commit 阶段就被拦下。
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY=""
+for c in "$ROOT/.venv/bin/python" "$ROOT/venv/bin/python" \
+         "$(command -v python3 2>/dev/null || true)" \
+         "$(command -v python 2>/dev/null || true)"; do
+  if [ -n "$c" ] && [ -x "$c" ]; then PY="$c"; break; fi
+done
+
+if [ -z "$PY" ]; then
+  echo "⚠️  找不到 Python，跳过冒烟测试"
+  exit 0
+fi
+
+if ! "$PY" "$ROOT/smoke_test.py"; then
+  echo ""
+  echo "❌ 冒烟测试未通过，提交被阻止"
+  echo "   如果确认要跳过： git commit --no-verify"
+  exit 1
+fi

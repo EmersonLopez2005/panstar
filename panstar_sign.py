@@ -54,9 +54,18 @@ def load_env_file(path: str = ENV_FILE) -> None:
          导致实际生效的是空字符串 → agent 返回 401「token 不正确」。
          这正是之前踩的坑。
       3. 同一个键出现多次时，**最后一个非空值生效**。
+
+    实现要点：**必须先把文件读完整再写 os.environ**。
+    如果边读边写，第一个非空值写进去后，第二个非空值来时
+    os.environ 里已经有值了 —— 无法区分「外部环境变量」和
+    「同一文件里前面读进来的」，后者会被误判成外部变量而跳过。
+    （实测踩过：K=OLD / K=NEW 结果取到了 OLD。）
     """
     if not os.path.exists(path):
         return
+
+    # 第一遍：收集文件里每个键的最后一个非空值
+    file_values: Dict[str, str] = {}
     with open(path, encoding="utf-8") as fh:
         for raw in fh:
             line = raw.strip()
@@ -65,16 +74,16 @@ def load_env_file(path: str = ENV_FILE) -> None:
             key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            if not key:
-                continue
-            if not value:
-                # 空值不写进 os.environ，也不阻止后续赋值
-                continue
-            existing = os.environ.get(key, "")
-            if existing and existing.strip():
-                # 外部环境变量已有非空值 —— 保持不动
-                continue
-            os.environ[key] = value
+            if not key or not value:
+                continue          # 空值不占位
+            file_values[key] = value
+
+    # 第二遍：写进 os.environ（外部已有的非空值优先）
+    for key, value in file_values.items():
+        existing = os.environ.get(key, "")
+        if existing and existing.strip():
+            continue              # 外部环境变量优先
+        os.environ[key] = value
 
 
 def cfg(name: str, default: str = "") -> str:

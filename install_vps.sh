@@ -266,6 +266,23 @@ fi
 "$PY" -m pip install -r "$APP_DIR/agent/requirements.txt" --quiet
 grn "Python 依赖就绪（含 agent 依赖）"
 
+# ---------------------------------------------------------------- 冒烟测试
+# **语法检查抓不到「语法合法但语义错误」的 bug。**
+# 真实案例：_memory_mb() 被误加 @contextmanager 装饰器 ——
+# py_compile 完全通过，但运行时返回 _GeneratorContextManager 而不是 int，
+# 于是 avail < 700 抛 TypeError。而且这个函数只在真正跑浏览器时才被调用，
+# 也就是说只有部署到 VPS 上才暴露。
+#
+# 所以部署前先跑一遍冒烟测试：实际调用关键函数，而不是只看语法。
+step "冒烟测试"
+if "$PY" "$APP_DIR/smoke_test.py"; then
+  grn "冒烟测试通过"
+else
+  red "  ❌ 冒烟测试未通过 —— 先修好再继续，否则部署完才发现问题"
+  echo "     单独运行查看详情： $PY $APP_DIR/smoke_test.py"
+  exit 1
+fi
+
 # ---------------------------------------------------------------- 浏览器
 step "安装浏览器内核（$ENGINE）"
 

@@ -251,9 +251,13 @@ def parse_proxy(proxy: Optional[str]) -> Optional[dict]:
     return cfg
 
 
-@contextmanager
 def _memory_mb() -> int:
-    """系统可用内存（MB）。读不到时返回一个大数（不做限制）。"""
+    """系统可用内存（MB）。读不到时返回一个大数（不做限制）。
+
+    注意：这是**普通函数**，不是 context manager。
+    （之前误加了 @contextmanager 装饰器，导致调用返回
+    _GeneratorContextManager 对象，比较时抛 TypeError。）
+    """
     try:
         with open("/proc/meminfo", encoding="utf-8") as fh:
             for line in fh:

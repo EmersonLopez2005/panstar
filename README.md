@@ -125,6 +125,9 @@ panstar-autosign/
 ├── turnstile_solver.py     Turnstile token 获取（浏览器代理 → 本地浏览器）
 ├── browser_engine.py       反检测浏览器适配层
 ├── check_env.py            部署体检
+├── check_config.py         配置诊断（显示运行时实际生效的值）
+├── smoke_test.py           冒烟测试（部署前 + 提交前自动跑）
+├── fetch_camoufox.py       绕过 GitHub API 限流直装浏览器
 ├── install_vps.sh          一键安装
 ├── run_sign.sh             cron 包装（带锁/心跳/预演）
 ├── cleanup_browsers.sh     清理多余浏览器内核
@@ -215,6 +218,12 @@ journalctl -u panstar-agent -n 100
 # agent 健康检查
 curl http://127.0.0.1:3000/health
 
+# 配置诊断（重点看「运行时实际生效的值」）
+python3 check_config.py
+
+# 冒烟测试（部署前跑）
+python3 smoke_test.py
+
 # 磁盘清理 + 空间体检（会扫描全盘 Top 15，找出空间到底在哪）
 bash cleanup_disk.sh            # 只报告
 bash cleanup_disk.sh --clean    # 真删
@@ -266,6 +275,7 @@ Camoufox 的真实开销是 **峰值约 2.6GB**（下载包 ~1.2GB 和解压后�
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
+| `TypeError: '<' not supported between '_GeneratorContextManager' and 'int'` | 普通函数被误加 `@contextmanager` 装饰器 | 已修（`browser_engine._memory_mb`）；`smoke_test.py` 会拦这类错误 |
 | **CPU 100%、机器卡死、日志一行不出** | **内存不足导致 swap 抖动** —— 两个浏览器实例抢 1 核 / 1GB | 加 swap（见上）；或换 ≥2GB 的机器；新版已限制"不叠加第二个浏览器" |
 | `浏览器代理失败: token 不正确` | **`.env` 的 `LOGIN_AGENT_TOKEN` 与 agent 的 `AGENT_TOKEN` 不一致** | 重跑 `bash install_vps.sh --agent`（新版会自动把 token 统一写进 `.env`） |
 | `403 rate limit exceeded` / `Synced 0 versions from 0 repos` | **GitHub API 限流** —— 未认证的 API 调用只有 60 次/小时，VPS 共享 IP 常被打满 | `python fetch_camoufox.py`（绕开 API，**无需 token**）；或设 `GITHUB_TOKEN` |
