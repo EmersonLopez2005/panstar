@@ -111,6 +111,20 @@ def show_effective() -> None:
         print("     修复：把所有重复行删掉，只留一行有值的：")
         print("       grep -n LOGIN_AGENT_TOKEN .env")
         print("       sed -i '/^LOGIN_AGENT_TOKEN=$/d' .env")
+    elif "=" in token:
+        # **常见手滑**：把 KEY= 前缀也复制进来了。
+        # 例如从 systemd 单元复制时拿的是 `Environment=AGENT_TOKEN=xxx`，
+        # 结果填成 `LOGIN_AGENT_TOKEN=AGENT_TOKEN=xxx`。
+        print()
+        prefix = token.split("=", 1)[0]
+        print(f"  ❌ token 的值里混进了 '{prefix}=' 前缀 —— 这就是 401 的原因")
+        print(f"     你填的是： {token}")
+        print(f"     应该是：   {token.split('=', 1)[1]}")
+        print()
+        print("     一键修复：")
+        print(f"       sed -i 's|^LOGIN_AGENT_TOKEN=.*|LOGIN_AGENT_TOKEN="
+              f"{token.split('=', 1)[1]}|' .env")
+        print("       systemctl restart panstar-agent")
     if not url:
         print()
         print("  ❌ 没配 LOGIN_AGENT_URL —— 浏览器代理根本不会被调用")
@@ -161,19 +175,94 @@ def check_agent() -> None:
             print("  /auth-check  → ✅ token 正确")
         elif resp.status_code == 401:
             print("  /auth-check  → ❌ 401 token 不正确")
-            print()
-            print("     两边的 token 必须一致：")
-            print("       .env 里：")
-            print("         grep LOGIN_AGENT_TOKEN .env")
-            print("       agent 服务里：")
-            print("         grep AGENT_TOKEN /etc/systemd/system/panstar-agent.service")
-            print("     同步后重启： systemctl restart panstar-agent")
+            _print_token_mismatch(token)
+        elif resp.status_code == 404:
+            # agent 版本旧，没有 /auth-check 端点 ——
+            # 但不代表 token 对错，改成直接读 systemd 单元对比。
+            print("  /auth-check  → HTTP 404（agent 版本旧，没有这个端点）")
+            _compare_with_unit(token)
         else:
             print(f"  /auth-check  → HTTP {resp.status_code}")
-            print("     （agent 版本较旧，没有 /auth-check 端点，"
-                  "升级： cd ~/panstar && git pull")
+            _compare_with_unit(token)
     except Exception as exc:  # noqa: BLE001
         print(f"  /auth-check  → 请求失败: {exc}")
+        _compare_with_unit(token)
+
+
+UNIT_PATH = "/etc/systemd/system/panstar-agent.service"
+
+
+def _unit_token() -> str:
+    """从 systemd 单元里读出 AGENT_TOKEN。"""
+    try:
+        with open(UNIT_PATH, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("Environment=AGENT_TOKEN="):
+                    return line.split("=", 2)[2].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
+
+
+def _compare_with_unit(token: str) -> None:
+    """直接把 .env 里的 token 和 systemd 单元里的对比。"""
+    unit = _unit_token()
+    if not unit:
+        print()
+        print(f"  读不到 {UNIT_PATH}")
+        print("  手动对比：")
+        print("    grep AGENT_TOKEN " + UNIT_PATH)
+        return
+
+    print()
+    print("  token 对比：")
+    print(f"    .env 里         = {token[:8]}…{token[-4:]}")
+    print(f"    systemd 单元里  = {unit[:8]}…{unit[-4:]}")
+    if token == unit:
+        print("    ✅ 两边一致")
+        return
+
+    print("    ❌ 两边不一致")
+    print()
+    # 常见的手滑：把 KEY= 前缀也复制进去了
+    if "=" in token:
+        prefix = token.split("=", 1)[0]
+        if unit == token.split("=", 1)[1]:
+            print(f"    💡 找到了：你把 '{prefix}=' 也复制进去了！")
+            print(f"       正确的值应该是（不要带前缀）：")
+            print(f"         {unit}")
+            print()
+            print("       一键修复：")
+            print(f"         sed -i 's|^LOGIN_AGENT_TOKEN=.*|LOGIN_AGENT_TOKEN={unit}|' .env")
+            print("         systemctl restart panstar-agent")
+            return
+    print("    修复（推荐让脚本自动对齐，别手抄）：")
+    print("      cd ~/panstar && git pull")
+    print("      bash install_vps.sh --agent")
+    print("    或手动：")
+    print(f"      sed -i 's|^LOGIN_AGENT_TOKEN=.*|LOGIN_AGENT_TOKEN={unit}|' .env")
+    print("      systemctl restart panstar-agent")
+
+
+def _print_token_mismatch(token: str) -> None:
+    print()
+    print("     两边的 token 必须一致：")
+    print("       .env 里：")
+    print("         grep LOGIN_AGENT_TOKEN .env")
+    print("       agent 服务里：")
+    print(f"         grep AGENT_TOKEN {UNIT_PATH}")
+    print("     同步后重启： systemctl restart panstar-agent")
+    if "=" in token:
+        prefix = token.split("=", 1)[0]
+        unit = _unit_token()
+        if unit and unit == token.split("=", 1)[1]:
+            print()
+            print(f"     💡 看起来是你把 '{prefix}=' 前缀也复制进去了")
+            print(f"        正确的值：{unit}")
+            print(f"        一键修复：")
+            print(f"          sed -i 's|^LOGIN_AGENT_TOKEN=.*|LOGIN_AGENT_TOKEN={unit}|' .env")
+            print("          systemctl restart panstar-agent")
 
 
 def main() -> int:
