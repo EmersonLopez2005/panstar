@@ -70,10 +70,19 @@ tail -f logs/sign.log
 # 账号（多账号用 & 分隔）
 PS_USER_PASS=你的邮箱:你的密码
 
-# 浏览器代理地址（install_vps.sh --agent 会自动起）
+# 浏览器代理地址（install_vps.sh --agent 会自动起并写好）
 LOGIN_AGENT_URL=http://127.0.0.1:3000
-LOGIN_AGENT_TOKEN=安装脚本会打印出来，填这里
+
+# 代理访问令牌 —— install_vps.sh --agent 会自动生成并写进 .env
+LOGIN_AGENT_TOKEN=（自动填，不用手写）
 ```
+
+> **token 不用手工复制。** 之前是安装脚本打印一串 token、让人手动填进 `.env`，
+> 而每次重跑安装都会生成新 token 覆盖 systemd 单元 —— 两边一旦不一致，
+> agent 就返回 401「token 不正确」。
+> 现在 `.env` 是唯一真源：安装时把 token 写进 `.env`，
+> systemd 单元用 `EnvironmentFile` 读取，永远一致。
+> 改完 `.env` 只需 `systemctl restart panstar-agent`。
 
 完整项见 `.env.example`。
 
@@ -258,6 +267,7 @@ Camoufox 的真实开销是 **峰值约 2.6GB**（下载包 ~1.2GB 和解压后�
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | **CPU 100%、机器卡死、日志一行不出** | **内存不足导致 swap 抖动** —— 两个浏览器实例抢 1 核 / 1GB | 加 swap（见上）；或换 ≥2GB 的机器；新版已限制"不叠加第二个浏览器" |
+| `浏览器代理失败: token 不正确` | **`.env` 的 `LOGIN_AGENT_TOKEN` 与 agent 的 `AGENT_TOKEN` 不一致** | 重跑 `bash install_vps.sh --agent`（新版会自动把 token 统一写进 `.env`） |
 | `403 rate limit exceeded` / `Synced 0 versions from 0 repos` | **GitHub API 限流** —— 未认证的 API 调用只有 60 次/小时，VPS 共享 IP 常被打满 | `python fetch_camoufox.py`（绕开 API，**无需 token**）；或设 `GITHUB_TOKEN` |
 | `v156.0.1-beta.36 ... is not in official's releases` | 同上（限流导致查不到版本列表） | 同上 |
 | `No space left on device`（但 `df` 显示空间充足） | **camoufox 把下载的 zip 落在 `$TMPDIR`/`/tmp`**，很多 VPS 的 `/tmp` 是小 tmpfs（内存盘） | `export TMPDIR=/大盘/tmp && mkdir -p $TMPDIR` 再重装；安装脚本会自动检测并提示 |

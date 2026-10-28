@@ -185,23 +185,52 @@ def _drive_turnstile(page, site_key: str, url: str, action: str,
 
 
 def check_agent_health(agent_url: str, agent_token: str = "") -> dict:
-    """检查浏览器代理是否在线。返回 {"ok": bool, "engine": str, "message": str}"""
+    """检查浏览器代理是否在线。
+
+    返回 {"ok", "engine", "busy", "auth_ok", "message"}。
+
+    注意 **auth_ok** 这个字段：/health 接口本身不鉴权，所以
+    「agent 在线」不代表「token 是对的」。必须额外用 token 调一次
+    需要鉴权的接口，才能确认两边 token 一致。
+    否则会出现这种情况：agent 在线 → 真正签到时 401 →
+    被误报成「内存不足，浏览器方案不可行」。
+    """
     try:
         headers = {}
         if agent_token:
             headers["Authorization"] = f"Bearer {agent_token}"
         resp = requests.get(f"{agent_url.rstrip('/')}/health", headers=headers, timeout=8)
         if resp.status_code != 200:
-            return {"ok": False, "engine": "", "message": f"HTTP {resp.status_code}"}
+            return {"ok": False, "engine": "", "busy": False, "auth_ok": False,
+                    "message": f"HTTP {resp.status_code}"}
         data = resp.json()
-        return {
+        result = {
             "ok": bool(data.get("ok")),
             "engine": data.get("engine", ""),
             "busy": bool(data.get("busy", False)),
+            "auth_ok": True,
             "message": data.get("message", ""),
         }
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "engine": "", "busy": False, "message": str(exc)}
+        return {"ok": False, "engine": "", "busy": False, "auth_ok": False,
+                "message": str(exc)}
+
+    # 用 token 探一次 /auth-check（不启动浏览器，只校验 token）
+    if agent_token:
+        try:
+            probe = requests.get(
+                f"{agent_url.rstrip('/')}/auth-check",
+                headers={"Authorization": f"Bearer {agent_token}"},
+                timeout=8,
+            )
+            if probe.status_code == 401:
+                result["auth_ok"] = False
+                result["message"] = "token 不正确（401）"
+        except Exception:
+            # 探测失败不影响判断，auth_ok 保持 True
+            pass
+
+    return result
 
 
 def _available_memory_mb() -> int:

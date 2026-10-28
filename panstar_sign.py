@@ -163,6 +163,15 @@ def notify(title: str, content: str) -> None:
 # --------------------------------------------------------------------------
 # 核心签到
 # --------------------------------------------------------------------------
+class AgentAuthError(Exception):
+    """浏览器代理鉴权失败（401）。
+
+    单独一个类型，因为它是**配置问题**，和内存、浏览器、CF 都无关。
+    之前被笼统地包成 RuntimeError，结果上层把「内存不足、浏览器方案不可行」
+    当成结论抛出来 —— 完全是误导，会让人往错的方向排查。
+    """
+
+
 def agent_checkin(agent_url: str, agent_token: str, access_token: str = "",
                   refresh_token: str = "", username: str = "",
                   password: str = "", profile: str = "default",
@@ -197,6 +206,23 @@ def agent_checkin(agent_url: str, agent_token: str, access_token: str = "",
     except Exception:
         raise RuntimeError(f"浏览器代理返回非 JSON: {resp.text[:200]}")
     if not data.get("ok"):
+        # **401 要单独识别。**
+        # agent 的 401 = LOGIN_AGENT_TOKEN 和它自己的 AGENT_TOKEN 对不上。
+        # 这是配置问题，不是内存问题、不是浏览器问题。
+        # 之前它被笼统地包成 RuntimeError，导致上层把「内存不足、
+        # 浏览器方案不可行」当成结论抛出来 —— 完全是误导。
+        if resp.status_code == 401 or data.get("error") == "UNAUTHORIZED":
+            raise AgentAuthError(
+                "浏览器代理鉴权失败（401）：.env 里的 LOGIN_AGENT_TOKEN 与 "
+                "agent 服务的 AGENT_TOKEN 不一致。\n"
+                "  修复（二选一）：\n"
+                "    A) 重新跑安装脚本，它会把 token 统一写进 .env：\n"
+                "         bash install_vps.sh --agent\n"
+                "    B) 手动同步（注意 .env 里是 LOGIN_AGENT_TOKEN）：\n"
+                "         grep AGENT_TOKEN /etc/systemd/system/panstar-agent.service\n"
+                "         # 把上面那串填到 .env 的 LOGIN_AGENT_TOKEN= 后面\n"
+                "       然后 systemctl restart panstar-agent"
+            )
         raise RuntimeError(
             f"浏览器代理失败: {data.get('message') or data.get('error') or resp.text[:150]}"
         )
@@ -244,6 +270,22 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
     if agent_url:
         from turnstile_solver import check_agent_health
         health = check_agent_health(agent_url, agent_token)
+        if health["ok"] and not health.get("auth_ok", True):
+            # **鉴权失败要立刻报出来。**
+            # /health 不鉴权，所以「在线」不代表「token 对」。
+            # 如果不拦 here，错误会一路传到「内存不足、浏览器方案不可行」，
+            # 把人带偏到完全无关的方向。
+            raise AgentAuthError(
+                "浏览器代理鉴权失败（401）：.env 里的 LOGIN_AGENT_TOKEN 与 "
+                "agent 服务的 AGENT_TOKEN 不一致。\n"
+                "  修复（二选一）：\n"
+                "    A) 重新跑安装脚本，它会把 token 统一写进 .env：\n"
+                "         bash install_vps.sh --agent\n"
+                "    B) 手动同步：\n"
+                "         grep AGENT_TOKEN /etc/systemd/system/panstar-agent.service\n"
+                "         # 把上面那串填到 .env 的 LOGIN_AGENT_TOKEN= 后面\n"
+                "       然后 systemctl restart panstar-agent"
+            )
         if health["ok"]:
             print(f"[agent] 在线（engine={health['engine']}）")
         else:
@@ -267,6 +309,7 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
 
     # 3b. 让浏览器代理直接在浏览器里完成整个签到（最接近真人操作）
     agent_failed = False
+    agent_error = ""
     if result is None and agent_url:
         print("[checkin] 让浏览器代理直接完成签到")
         try:
@@ -285,9 +328,14 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
                 return {"status": "success", "summary": summary}
             print(f"[checkin] 浏览器签到未成功（flow={flow}）")
             agent_failed = True
+            agent_error = f"浏览器签到未成功（flow={flow}）"
+        except AgentAuthError:
+            # 鉴权失败是配置问题，直接抛出 —— 不要再被当成「内存不足」
+            raise
         except Exception as exc:
             print(f"[checkin] 浏览器代理签到失败: {exc}")
             agent_failed = True
+            agent_error = str(exc)
 
     # 3c. 退一步：让浏览器只拿 Turnstile token，主脚本自己走 preflight → 签到
     #
@@ -301,7 +349,7 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
         if agent_failed:
             raise PanstarError(
                 718,
-                "浏览器代理签到失败，且本机内存不足以再起一个浏览器。\n"
+                f"浏览器代理签到失败：{agent_error}\n"
                 "  浏览器方案在当前机器上不可行。\n"
                 "  可选做法：\n"
                 "    1) 换台内存 ≥ 2GB 的 VPS（推荐，Camoufox 单实例就要 300-500MB）\n"

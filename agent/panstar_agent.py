@@ -174,6 +174,20 @@ def health():
     })
 
 
+@app.get("/auth-check")
+def auth_check():
+    """只校验 token，不启动浏览器。
+
+    /health 不鉴权，所以「agent 在线」并不代表「token 是对的」。
+    主脚本用这个端点确认两边的 LOGIN_AGENT_TOKEN 一致，
+    免得真到签到时才发现 401。
+    """
+    if not auth_ok():
+        return jsonify({"ok": False, "error": "UNAUTHORIZED",
+                        "message": "token 不正确"}), 401
+    return jsonify({"ok": True, "message": "token 正确"})
+
+
 @app.post("/turnstile")
 def api_turnstile():
     """在浏览器里跑一次 Turnstile，返回 token。

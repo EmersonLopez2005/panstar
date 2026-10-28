@@ -444,11 +444,47 @@ mkdir -p "$APP_DIR/logs" "$APP_DIR/data" "$APP_DIR/cookie"
 # ---------------------------------------------------------------- systemd
 if [ "$MODE" = "--agent" ]; then
   step "注册 systemd 服务（浏览器代理）"
-  AGENT_TOKEN_VALUE="$("$PY" - <<'PY'
+
+  # **token 必须由 .env 统一管理。**
+  # 之前是每次安装都生成一个新 token 写进 systemd 单元，
+  # 而 .env 里的是用户手填的旧值 —— 两者一旦不一致，
+  # agent 就返回 401「token 不正确」，而主脚本会把 401
+  # 误报成「内存不足，浏览器方案不可行」，把人带偏。
+  #
+  # 现在改成：.env 是唯一真源。
+  #   - .env 里已有 LOGIN_AGENT_TOKEN → 沿用它
+  #   - 没有 → 生成一个并写进 .env
+  # systemd 单元通过 EnvironmentFile 读取，两边永远一致。
+  if [ -f "$APP_DIR/.env" ] && grep -qE '^LOGIN_AGENT_TOKEN=.+' "$APP_DIR/.env"; then
+    AGENT_TOKEN_VALUE="$(grep -E '^LOGIN_AGENT_TOKEN=' "$APP_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"' ')"
+    ylw "  沿用 .env 里已有的 LOGIN_AGENT_TOKEN"
+  else
+    AGENT_TOKEN_VALUE="$("$PY" - <<'PY'
 import secrets
 print(secrets.token_urlsafe(32))
 PY
 )"
+    # 写进 .env（存在则替换，不存在则追加）
+    if [ -f "$APP_DIR/.env" ]; then
+      if grep -qE '^LOGIN_AGENT_TOKEN=' "$APP_DIR/.env"; then
+        sed -i "s|^LOGIN_AGENT_TOKEN=.*|LOGIN_AGENT_TOKEN=$AGENT_TOKEN_VALUE|" "$APP_DIR/.env"
+      else
+        printf 'LOGIN_AGENT_TOKEN=%s\n' "$AGENT_TOKEN_VALUE" >> "$APP_DIR/.env"
+      fi
+    else
+      printf 'LOGIN_AGENT_TOKEN=%s\n' "$AGENT_TOKEN_VALUE" > "$APP_DIR/.env"
+    fi
+    grn "  已生成新 token 并写入 .env"
+  fi
+  # 代理地址也一并写进 .env，免得用户还要手动填地址
+  if [ -f "$APP_DIR/.env" ]; then
+    if grep -qE '^LOGIN_AGENT_URL=' "$APP_DIR/.env"; then
+      sed -i "s|^LOGIN_AGENT_URL=.*|LOGIN_AGENT_URL=http://127.0.0.1:3000|" "$APP_DIR/.env"
+    else
+      printf 'LOGIN_AGENT_URL=http://127.0.0.1:3000\n' >> "$APP_DIR/.env"
+    fi
+  fi
+
   # 缓存路径：--cache= 指定的大盘，或默认 ~/.cache
   if [ -n "$CACHE_HOME" ]; then
     AGENT_CACHE_ENV="Environment=XDG_CACHE_HOME=$CACHE_HOME
@@ -482,6 +518,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$APP_DIR/agent
+# **token 从 .env 读，不在单元里硬编码** ——
+# 这样 .env 是唯一真源，改了 .env 重启服务就生效，
+# 不会出现「单元里的 token 和 .env 里的不一致 → 401」这种坑。
+EnvironmentFile=-$APP_DIR/.env
 Environment=AGENT_TOKEN=$AGENT_TOKEN_VALUE
 Environment=AGENT_HOST=0.0.0.0
 Environment=AGENT_PORT=3000
@@ -506,8 +546,7 @@ EOF
   if $SUDO systemctl is-active --quiet panstar-agent; then
     grn "浏览器代理已启动：panstar-agent.service"
     echo "  健康检查: curl http://127.0.0.1:3000/health"
-    echo "  AGENT_TOKEN=$AGENT_TOKEN_VALUE"
-    echo "  → 把上面这行写进 $APP_DIR/.env 的 LOGIN_AGENT_TOKEN"
+    grn "  token 已自动写入 .env（LOGIN_AGENT_TOKEN），无需手工复制"
   else
     red "浏览器代理启动失败，看日志：journalctl -u panstar-agent -n 50"
     echo ""
