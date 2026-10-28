@@ -43,8 +43,11 @@
 ```bash
 git clone <这个仓库> panstar-autosign && cd panstar-autosign
 
-# 装依赖 + 浏览器 + venv（Camoufox 约 1.3GB，下载慢是正常的）
+# 装依赖 + 浏览器 + venv（Camoufox 峰值约 2.6GB，下载慢是正常的）
 bash install_vps.sh --agent
+
+# 空间紧张时：把浏览器内核放到另一块盘 + 跳过中文字体
+bash install_vps.sh --agent --cache=/mnt/大硬盘 --no-cjk-fonts
 
 # 体检：看出口 IP、浏览器能不能过挑战
 python3 check_env.py
@@ -141,10 +144,29 @@ journalctl -u panstar-agent -n 100
 # agent 健康检查
 curl http://127.0.0.1:3000/health
 
-# 磁盘清理（Camoufox 需要 1.3GB，空间紧张时先跑）
-bash cleanup_disk.sh          # 只报告
-bash cleanup_disk.sh --clean  # 真删
+# 磁盘清理 + 空间体检（会扫描全盘 Top 15，找出空间到底在哪）
+bash cleanup_disk.sh            # 只报告
+bash cleanup_disk.sh --clean    # 真删
+bash cleanup_disk.sh --aggressive  # 真删 + 删未使用的 Docker 镜像
 ```
+
+## 磁盘不够怎么办
+
+Camoufox 的真实开销是 **峰值约 2.6GB**（下载包 ~1.2GB 和解压后的 ~1.2GB 会同时存在），
+不是 1.3GB。按下面顺序处理：
+
+| 办法 | 命令 | 效果 |
+|---|---|---|
+| 定位大头 | `bash cleanup_disk.sh` | 扫全盘 Top 15，直接告诉你空间在哪 |
+| 清理 | `bash cleanup_disk.sh --clean` | apt 缓存、旧内核、Docker 悬空镜像、journald |
+| **换大盘放内核** | `bash install_vps.sh --cache=/mnt/大硬盘` | **最有效**，浏览器内核挪到另一块盘 |
+| 换轻量引擎 | `bash install_vps.sh --engine=patchright` | 约 400MB，但过 CF 成功率较低 |
+| 省中文字体 | `bash install_vps.sh --no-cjk-fonts` | 省约 250MB（页面可能显示方框） |
+| 硬装 | `bash install_vps.sh --force` | 跳过空间检查（可能中途失败） |
+
+> `--cache=` 用「软链接 + `XDG_CACHE_HOME`」双保险实现：
+> Camoufox 认 `XDG_CACHE_HOME`，Playwright/Patchright 认 `PLAYWRIGHT_BROWSERS_PATH`。
+> 路径会同时写进 `.env` 和 systemd 单元，cron 环境下也能找到。
 
 **签到一直失败时按这个顺序查：**
 
@@ -157,9 +179,11 @@ bash cleanup_disk.sh --clean  # 真删
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `No space left on device` | 磁盘满，Camoufox 下到一半失败 | `bash cleanup_disk.sh --clean`，然后重装浏览器 |
+| `No space left on device` | 磁盘满，Camoufox 下到一半失败 | `bash cleanup_disk.sh --clean`，然后 `python -m camoufox fetch` 重装 |
+| 清理完磁盘一点没释放 | 大头不在 apt/Docker/日志里 | `bash cleanup_disk.sh` 看全盘 Top 15，或 `du -xh --max-depth=1 / \| sort -h \| tail -15` |
+| `没有可用的浏览器引擎` | pip 装了包但浏览器本体没下载 | `python -m camoufox fetch`（约 1.2GB） |
+| 装好了却说找不到浏览器 | `--cache=` 装到了大盘，但 cron 环境没带上变量 | 重新跑 `install_vps.sh --cache=...`（会写进 `.env`），或直接 `export XDG_CACHE_HOME=...` |
 | `[agent] 不可用` | agent 没启动 | `systemctl start panstar-agent` 或 `cd agent && docker compose up -d` |
-| `没有可用的浏览器引擎` | pip 装了包但浏览器本体没下载 | `python -m camoufox fetch`（约 1.3GB） |
 | `Task was destroyed but it is pending!` | 浏览器启动失败的 asyncio 残留噪音 | 已静音，不是错误 |
 | `ts: unbound variable` | 旧版 `run_sign.sh` 的 bug | 升级到最新版（已修） |
 | 一直报 `需要 Turnstile` 但浏览器在跑 | 出口 IP 被 Cloudflare 判高风险 | 换 IP 或挂 `AGENT_PROXY` |

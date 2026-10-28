@@ -54,44 +54,77 @@ def _ensure_display() -> Optional[subprocess.Popen]:
     return proc
 
 
+def _cache_home() -> str:
+    """浏览器缓存根目录。
+
+    Camoufox 用 `platformdirs.user_cache_dir("camoufox")`，在 Linux 上等价于
+    `~/.cache/camoufox`，但它**遵循 XDG_CACHE_HOME**；
+    Playwright / Patchright 遵循 `PLAYWRIGHT_BROWSERS_PATH`。
+    两者都要认，否则「把浏览器内核挪到大盘上」就落不了地。
+    """
+    xdg = os.environ.get("XDG_CACHE_HOME", "").strip()
+    return xdg or os.path.join(os.path.expanduser("~"), ".cache")
+
+
+def _camoufox_install_dir() -> Optional[str]:
+    """Camoufox 的安装目录（不触发下载）。"""
+    # 新版 camoufox.pkgman 直接暴露 INSTALL_DIR
+    try:
+        from camoufox import pkgman
+        inst = getattr(pkgman, "INSTALL_DIR", None)
+        if inst:
+            return str(inst)
+    except Exception:
+        pass
+    # 退回到 platformdirs 的默认位置
+    try:
+        from platformdirs import user_cache_dir
+        return user_cache_dir("camoufox")
+    except Exception:
+        pass
+    return os.path.join(_cache_home(), "camoufox")
+
+
 def _camoufox_binary_installed() -> bool:
     """检查 Camoufox 浏览器本体是否已下载。
 
-    `pip install camoufox` 只装了 Python 包，浏览器本体（约 1.3GB）还需要
+    `pip install camoufox` 只装了 Python 包，浏览器本体（约 1.2GB）还需要
     单独执行 `python -m camoufox fetch` 才会下载。
 
     只判 import 会造成误判：以为引擎可用，实际在运行时才去下载，
     磁盘不够就直接失败（ERRNO 28 No space left on device）。
+
+    注意：**不能调用 `pkgman.camoufox_path()`** —— 新版该函数在未安装时
+    会触发自动下载，体检脚本只想「看一眼」，不该把 1.2GB 拖下来。
     """
     try:
-        from camoufox import pkgman
+        from camoufox import pkgman  # noqa: F401
     except ImportError:
         return False
 
-    # 新版 camoufox 提供了路径查询接口
-    for attr in ("installed_path", "camoufox_path", "get_camoufox_path"):
-        fn = getattr(pkgman, attr, None)
-        if callable(fn):
-            try:
-                path = fn()
-                if path and os.path.exists(path):
-                    return True
-            except Exception:
-                continue
+    inst = _camoufox_install_dir()
+    if not inst or not os.path.isdir(inst):
+        return False
 
-    # 兜底：检查缓存目录里是否有实际文件
-    candidates = [
-        os.path.join(os.path.expanduser("~"), ".cache", "camoufox"),
-        os.path.join(os.path.expanduser("~"), "Library", "Caches", "camoufox"),
-        "/root/.cache/camoufox",
-    ]
-    for root in candidates:
-        if not os.path.isdir(root):
-            continue
-        for dirpath, _dirnames, filenames in os.walk(root):
-            for name in filenames:
-                if name == "camoufox" or name.endswith(".so") or name == "firefox":
-                    return True
+    # 新版多版本结构：browsers/<version>/camoufox-bin
+    browsers_dir = os.path.join(inst, "browsers")
+    if os.path.isdir(browsers_dir):
+        for entry in os.listdir(browsers_dir):
+            candidate = os.path.join(browsers_dir, entry, "camoufox-bin")
+            if os.path.exists(candidate):
+                return True
+
+    # 旧版单版本结构：<inst>/camoufox-bin + version.json
+    if os.path.exists(os.path.join(inst, "camoufox-bin")):
+        return True
+    if os.path.exists(os.path.join(inst, "version.json")):
+        return True
+
+    # 兜底：目录里有可执行文件就算装好了
+    for dirpath, _dirnames, filenames in os.walk(inst):
+        for name in filenames:
+            if name == "camoufox-bin" or name == "camoufox" or name == "firefox":
+                return True
     return False
 
 
@@ -104,13 +137,21 @@ def _has_camoufox() -> bool:
     return _camoufox_binary_installed()
 
 
+def _playwright_browsers_path() -> str:
+    """Playwright / Patchright 的浏览器安装目录。"""
+    custom = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+    if custom:
+        return custom
+    return os.path.join(_cache_home(), "ms-playwright")
+
+
 def _has_patchright() -> bool:
     """Patchright 的 Chromium 是否已下载。"""
     try:
         import patchright  # noqa: F401
     except ImportError:
         return False
-    root = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
+    root = _playwright_browsers_path()
     if not os.path.isdir(root):
         return False
     for name in os.listdir(root):
@@ -162,7 +203,7 @@ def _package_installed(name: str) -> bool:
 
 
 def _playwright_binary_installed() -> bool:
-    root = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
+    root = _playwright_browsers_path()
     if not os.path.isdir(root):
         return False
     for name in os.listdir(root):
@@ -177,7 +218,7 @@ def missing_browser_hint() -> str:
     lines = ["没有可用的浏览器引擎。"]
     if status["camoufox"]["package"] and not status["camoufox"]["binary"]:
         lines.append(
-            "  Camoufox 的 Python 包已装，但浏览器本体（约 1.3GB）没下载 —— "
+            "  Camoufox 的 Python 包已装，但浏览器本体（约 1.2GB）没下载 —— "
             "执行：python -m camoufox fetch"
         )
     elif not status["camoufox"]["package"]:
@@ -189,7 +230,8 @@ def missing_browser_hint() -> str:
             "  备选（体积小但过 CF 成功率低）："
             "pip install patchright && patchright install --with-deps chromium"
         )
-    lines.append("  提示：浏览器本体需要约 1.3GB，请先确认磁盘空间足够。")
+    lines.append("  提示：Camoufox 下载包 + 解压后同时存在，**峰值约 2.6GB**，请先确认空间。")
+    lines.append("  空间不够时：bash cleanup_disk.sh --clean  或用 --cache=/大盘 换位置。")
     return "\n".join(lines)
 
 

@@ -71,14 +71,30 @@ def check_disk() -> None:
         avail_mb = st.f_bavail * st.f_frsize / 1024 / 1024
         total_mb = st.f_blocks * st.f_frsize / 1024 / 1024
         print(f"  可用: {avail_mb:.0f} MB / 总计 {total_mb:.0f} MB")
-        need = 4096
+        # Camoufox：下载包 ~1.2GB + 解压后 ~1.2GB 同时存在 → 峰值约 2.6GB
+        need = 3072
         if avail_mb < need:
-            print(f"  ❌ 空间不足！Camoufox 需要约 1.3GB，建议至少留 {need} MB")
-            print("     清理：bash cleanup_browsers.sh --clean")
-            print("           sudo apt-get autoremove -y && sudo apt-get clean")
-            print("     或换轻量引擎：bash install_vps.sh --engine=patchright")
+            print(f"  ❌ 空间不足！Camoufox 峰值需要约 2.6GB（下载包+解压同时存在）")
+            print("     定位大头：bash cleanup_disk.sh --clean  （会自动扫全盘 Top 15）")
+            print("     换大盘放内核：bash install_vps.sh --cache=/mnt/你的大盘")
+            print("     轻量替代：bash install_vps.sh --engine=patchright")
+            print("     省字体：  bash install_vps.sh --no-cjk-fonts")
         else:
             print(f"  ✅ 空间充足（建议至少 {need} MB）")
+
+        # 浏览器缓存在哪、占了多少
+        xdg = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+        cam = os.path.join(xdg, "camoufox")
+        if os.path.isdir(cam):
+            try:
+                size = subprocess.run(
+                    ["du", "-sh", cam], capture_output=True, text=True, timeout=30
+                ).stdout.split()[0]
+            except Exception:
+                size = "?"
+            print(f"  浏览器缓存: {cam} ({size})")
+            if os.path.islink(cam):
+                print(f"    ↳ 指向大盘: {os.path.realpath(cam)}")
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ 读不到磁盘信息: {exc}")
 

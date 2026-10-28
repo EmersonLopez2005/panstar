@@ -4,6 +4,9 @@
 #   bash install_vps.sh                      # 装依赖 + 浏览器(Camoufox) + venv
 #   bash install_vps.sh --agent               # 额外注册 systemd 常驻服务（推荐）
 #   bash install_vps.sh --engine=patchright   # 改用体积小的 Chromium 引擎（过 CF 成功率低）
+#   bash install_vps.sh --no-cjk-fonts        # 跳过中文字体（省 ~250MB）
+#   bash install_vps.sh --cache=/mnt/x        # 浏览器缓存放到别的盘（大盘机器救星）
+#   bash install_vps.sh --force               # 跳过磁盘空间检查，硬装
 #   bash install_vps.sh --check               # 只体检，不安装
 #   bash install_vps.sh --cleanup-browsers    # 清理这台机器上多余的浏览器内核
 #
@@ -11,7 +14,8 @@
 #   - 引擎默认 Camoufox（Firefox 定制版）。Cloudflare 会把 Chromium 的
 #     SwiftShader / headless 直接判成 bot，只有 Camoufox 的指纹伪装实测能过。
 #   - 必须有头（headless=False）+ Xvfb，headless 一定过不了挑战。
-#   - 磁盘占用：Camoufox 约 1.3GB；换成 patchright 约 200MB。
+#   - 磁盘占用：Camoufox 下载包 ~1.3GB + 解压后 ~1.3GB，**峰值约 2.6GB**；
+#     换成 patchright 约 400MB。
 #   - 本项目**不需要打码服务**，浏览器自己就能跑出 Turnstile token。
 
 set -euo pipefail
@@ -21,10 +25,16 @@ VENV="$APP_DIR/.venv"
 PY="$VENV/bin/python"
 MODE="${1:-}"
 ENGINE="camoufox"
+CJK_FONTS=1
+FORCE=0
+CACHE_HOME=""
 
 for arg in "$@"; do
   case "$arg" in
     --engine=*) ENGINE="${arg#*=}";;
+    --cache=*)  CACHE_HOME="${arg#*=}";;
+    --no-cjk-fonts) CJK_FONTS=0;;
+    --force)    FORCE=1;;
   esac
 done
 case "$ENGINE" in
@@ -72,10 +82,17 @@ fi
 # ---------------------------------------------------------------- 系统依赖
 step "安装系统依赖"
 $SUDO apt-get update -qq
+FONT_PKGS="fonts-liberation fonts-dejavu-core"
+if [ "$CJK_FONTS" = "1" ]; then
+  FONT_PKGS="fonts-noto-cjk $FONT_PKGS"
+  echo "  安装中文字体（--no-cjk-fonts 可跳过，省约 250MB）"
+else
+  echo "  跳过中文字体（页面可能显示方框，但不影响签到接口）"
+fi
 $SUDO apt-get install -y --no-install-recommends \
   ca-certificates curl tzdata xvfb xauth \
   python3 python3-venv python3-pip \
-  fonts-noto-cjk fonts-liberation fonts-dejavu-core \
+  $FONT_PKGS \
   libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
   libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
   libgbm1 libasound2 libpangocairo-1.0-0 libpango-1.0-0 libcairo2 \
@@ -86,27 +103,65 @@ $SUDO apt-get install -y --no-install-recommends \
   >/dev/null
 grn "系统依赖就绪"
 
+# ---------------------------------------------------------------- 浏览器缓存位置
+# 小硬盘机器的救命开关：把 1.3GB 的浏览器内核放到另一块盘上。
+# 实现方式是「软链接 + XDG_CACHE_HOME」双保险 —— 不管 camoufox / playwright
+# 内部是按 XDG_CACHE_HOME 还是按 ~/.cache 硬编码找路径，都能落到大盘上。
+if [ -n "$CACHE_HOME" ]; then
+  step "设置浏览器缓存位置"
+  mkdir -p "$CACHE_HOME"
+  mkdir -p "$HOME/.cache"
+  for target in "$HOME/.cache/camoufox" "$HOME/.cache/ms-playwright"; do
+    if [ -e "$target" ] && [ ! -L "$target" ]; then
+      rm -rf "$target"
+    fi
+    rm -f "$target"
+    ln -sfn "$CACHE_HOME/$(basename "$target")" "$target"
+    echo "  $target -> $CACHE_HOME/$(basename "$target")"
+  done
+  # 写进 .env 的动作放到下面「配置文件」章节 —— .env 这时候才刚生成。
+  # Camoufox 认 XDG_CACHE_HOME，Playwright/Patchright 认 PLAYWRIGHT_BROWSERS_PATH。
+  grn "浏览器缓存已指向 $CACHE_HOME"
+fi
+
 # ---------------------------------------------------------------- 磁盘空间
-# Camoufox 浏览器本体约 1.3GB，下载前必须先确认空间够，
-# 否则会下到一半报 "No space left on device"，留下一堆垃圾还查不清原因。
+# Camoufox 需要：下载包 ~1.3GB + 解压后 ~1.3GB，**同时存在 → 峰值约 2.6GB**。
+# 只报"需要 1.3GB"会让人以为 1.5GB 够用，结果下到一半就 No space left。
+case "$ENGINE" in
+  camoufox)   NEED_MB=3072 ;;   # 2.6GB 峰值 + 一点余量
+  patchright) NEED_MB=1024 ;;
+  *)          NEED_MB=3072 ;;
+esac
 step "检查磁盘空间"
 AVAIL_MB=$(df -Pm "$APP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
 if [ -z "$AVAIL_MB" ]; then
   ylw "  读不到磁盘信息，跳过检查"
 else
-  NEED_MB=4096
-  echo "  可用空间: ${AVAIL_MB} MB（需要至少 ${NEED_MB} MB）"
-  if [ "$AVAIL_MB" -lt "$NEED_MB" ]; then
-    red "  ❌ 磁盘空间不足！Camoufox 需要约 1.3GB，加上 venv 与系统依赖建议留 4GB。"
+  echo "  可用空间: ${AVAIL_MB} MB（$ENGINE 需要至少 ${NEED_MB} MB）"
+  if [ "$AVAIL_MB" -lt "$NEED_MB" ] && [ "$FORCE" != "1" ]; then
+    red "  ❌ 磁盘空间不足！"
     echo ""
-    echo "  先清理空间（会删 apt 缓存、旧浏览器内核、Docker 悬空镜像、系统日志）："
+    echo "  先定位大头并清理（会自动扫描全盘 Top 15）："
     echo "    bash $APP_DIR/cleanup_disk.sh --clean"
     echo ""
-    echo "  或改用体积小的 Chromium 引擎（过 CF 成功率较低）："
+    echo "  如果这台机器有第二块盘，把浏览器内核挪过去（最有效）："
+    echo "    bash $APP_DIR/install_vps.sh --engine=$ENGINE --cache=/mnt/你的大盘"
+    echo ""
+    echo "  空间实在不够就换轻量引擎（约 400MB，过 CF 成功率较低）："
     echo "    bash $APP_DIR/install_vps.sh --engine=patchright"
+    echo ""
+    echo "  也可以跳过中文字体省 ~250MB："
+    echo "    bash $APP_DIR/install_vps.sh --no-cjk-fonts"
+    echo ""
+    echo "  实在不行就 --force 硬装（可能还是会在下载中途失败）："
+    echo "    bash $APP_DIR/install_vps.sh --engine=$ENGINE --force"
     exit 1
   fi
-  grn "磁盘空间充足"
+  if [ "$AVAIL_MB" -lt "$NEED_MB" ]; then
+    ylw "  ⚠️ 空间不足但已 --force，继续（下载中途可能失败）"
+  else
+    grn "磁盘空间充足"
+  fi
 fi
 
 # ---------------------------------------------------------------- Python 环境
@@ -137,6 +192,22 @@ if [ ! -f "$APP_DIR/.env" ]; then
   ylw "已生成 .env，请编辑后填账号："
   echo "    nano $APP_DIR/.env"
 fi
+
+# 浏览器缓存位置写进 .env，让 run_sign.sh / agent 每次都带上。
+# Camoufox 认 XDG_CACHE_HOME，Playwright/Patchright 认 PLAYWRIGHT_BROWSERS_PATH。
+if [ -n "$CACHE_HOME" ]; then
+  set_env() {
+    local key="$1" val="$2"
+    if grep -qE "^${key}=" "$APP_DIR/.env"; then
+      sed -i "s|^${key}=.*|${key}=${val}|" "$APP_DIR/.env"
+    else
+      printf '%s=%s\n' "$key" "$val" >> "$APP_DIR/.env"
+    fi
+  }
+  set_env XDG_CACHE_HOME "$CACHE_HOME"
+  set_env PLAYWRIGHT_BROWSERS_PATH "$CACHE_HOME/ms-playwright"
+  grn "已把缓存路径写入 .env"
+fi
 mkdir -p "$APP_DIR/logs" "$APP_DIR/data" "$APP_DIR/cookie"
 
 # ---------------------------------------------------------------- systemd
@@ -147,6 +218,13 @@ import secrets
 print(secrets.token_urlsafe(32))
 PY
 )"
+  # 缓存路径：--cache= 指定的大盘，或默认 ~/.cache
+  if [ -n "$CACHE_HOME" ]; then
+    AGENT_CACHE_ENV="Environment=XDG_CACHE_HOME=$CACHE_HOME
+Environment=PLAYWRIGHT_BROWSERS_PATH=$CACHE_HOME/ms-playwright"
+  else
+    AGENT_CACHE_ENV="Environment=XDG_CACHE_HOME=$HOME/.cache"
+  fi
   cat > /etc/systemd/system/panstar-agent.service <<EOF
 [Unit]
 Description=PanstarCloud browser agent (Turnstile solver)
@@ -162,6 +240,7 @@ Environment=AGENT_PORT=3000
 Environment=AGENT_HEADLESS=false
 Environment=AGENT_ENGINE=$ENGINE
 Environment=AGENT_PROFILE_DIR=$APP_DIR/agent/data/profiles
+$AGENT_CACHE_ENV
 Environment=TZ=Asia/Shanghai
 ExecStart=$VENV/bin/python $APP_DIR/agent/panstar_agent.py
 Restart=always

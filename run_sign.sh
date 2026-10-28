@@ -24,6 +24,19 @@ export HOME="${HOME:-/root}"
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
 
+# ---- 从 .env 读浏览器缓存路径 ----
+# 用了 --cache=/大盘 安装时，浏览器内核不在 ~/.cache 下。
+# cron 环境下没有这些环境变量，不读 .env 就会报「找不到浏览器」。
+if [ -f "$APP_DIR/.env" ]; then
+  while IFS='=' read -r k v; do
+    case "$k" in
+      XDG_CACHE_HOME|PLAYWRIGHT_BROWSERS_PATH)
+        [ -n "$v" ] && export "$k=$v"
+        ;;
+    esac
+  done < <(grep -E '^(XDG_CACHE_HOME|PLAYWRIGHT_BROWSERS_PATH)=' "$APP_DIR/.env" 2>/dev/null)
+fi
+
 LOG_DIR="$APP_DIR/logs"
 LOG_FILE="$LOG_DIR/sign.log"
 HEARTBEAT="$LOG_DIR/last_run.txt"
