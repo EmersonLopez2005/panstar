@@ -111,17 +111,57 @@ if [ -n "$CACHE_HOME" ]; then
   step "设置浏览器缓存位置"
   mkdir -p "$CACHE_HOME"
   mkdir -p "$HOME/.cache"
+  # 规范化成绝对路径再做比较 —— 直接比字符串会因为斜杠写法不同而漏判，
+  # 结果又造出自环软链接。
+  CACHE_HOME="$(cd "$CACHE_HOME" && pwd)"
   for target in "$HOME/.cache/camoufox" "$HOME/.cache/ms-playwright"; do
+    name="$(basename "$target")"
+    dest="$CACHE_HOME/$name"
+    # **自环必须跳过。**
+    # 当 --cache 指向的就是 $HOME/.cache 本身时（如 --cache=/root/.cache），
+    # 「$HOME/.cache/camoufox -> /root/.cache/camoufox」是指向自己的软链接。
+    # 这种自环会让 mkdir(exist_ok=True) 抛 FileExistsError
+    # （is_dir() 因 ELOOP 返回 False），camoufox 直接崩掉。
+    if [ "$(cd "$(dirname "$target")" && pwd)/$name" = "$dest" ]; then
+      # 目标就是它自己 —— 保证它是个真实目录（顺手清掉可能存在的旧自环）
+      if [ -L "$target" ]; then
+        rm -f "$target"
+      fi
+      mkdir -p "$target"
+      echo "  $target（目标位置与自身相同，直接使用真实目录）"
+      continue
+    fi
     if [ -e "$target" ] && [ ! -L "$target" ]; then
       rm -rf "$target"
     fi
     rm -f "$target"
-    ln -sfn "$CACHE_HOME/$(basename "$target")" "$target"
-    echo "  $target -> $CACHE_HOME/$(basename "$target")"
+    ln -sfn "$dest" "$target"
+    echo "  $target -> $dest"
   done
+  # **自环校验**：软链接指回自己会让 mkdir(exist_ok=True) 抛 FileExistsError
+  # （is_dir() 因 ELOOP 返回 False），camoufox 直接崩。
+  # 这里再查一遍，不放心就干脆删掉链接改成真实目录。
+  for target in "$HOME/.cache/camoufox" "$HOME/.cache/ms-playwright"; do
+    if [ -L "$target" ]; then
+      link_dest="$(readlink -f "$target" 2>/dev/null || true)"
+      link_self="$(cd "$(dirname "$target")" && pwd)/$(basename "$target")"
+      if [ -z "$link_dest" ] || [ "$link_dest" = "$link_self" ]; then
+        rm -f "$target"
+        mkdir -p "$target"
+        ylw "  已移除异常软链接，改为真实目录：$target"
+      fi
+    fi
+  done
+  # **必须在这里 export，不能只写进 .env。**
+  # camoufox 的 INSTALL_DIR = Path(user_cache_dir("camoufox"))，
+  # user_cache_dir 读的是 XDG_CACHE_HOME —— 写进 .env 要等下次进程启动才生效，
+  # 而「下载浏览器」就发生在当前进程里。不 export 的话，
+  # camoufox 会把内核装到 ~/.cache/camoufox，跟你指定的目录不是一回事。
+  export XDG_CACHE_HOME="$CACHE_HOME"
+  export PLAYWRIGHT_BROWSERS_PATH="$CACHE_HOME/ms-playwright"
   # 写进 .env 的动作放到下面「配置文件」章节 —— .env 这时候才刚生成。
-  # Camoufox 认 XDG_CACHE_HOME，Playwright/Patchright 认 PLAYWRIGHT_BROWSERS_PATH。
   grn "浏览器缓存已指向 $CACHE_HOME"
+  grn "已 export XDG_CACHE_HOME / PLAYWRIGHT_BROWSERS_PATH（本进程立即生效）"
 fi
 
 # ---------------------------------------------------------------- 磁盘空间
@@ -185,9 +225,18 @@ step "安装浏览器内核（$ENGINE）"
 # 很多 VPS 把 /tmp 挂成 tmpfs（内存盘，通常只有几百 MB），
 # 于是会出现「df 显示还有 6GB，但下载到 0.5GB 就 No space left on device」。
 # 把 TMPDIR 指到大盘上，这个坑就绕过去了。
-TMP_BASE="${TMPDIR:-/tmp}"
-if [ -n "$CACHE_HOME" ]; then
-  TMP_BASE="$CACHE_HOME"
+#
+# 优先级：
+#   1. 用户已经 export 的 TMPDIR（手动指定过，尊重它，但会校验空间）
+#   2. --cache 指定的大盘下的 tmp/ 子目录
+#   3. /tmp
+if [ -n "${TMPDIR:-}" ] && [ "$TMPDIR" != "/tmp" ]; then
+  TMP_BASE="$TMPDIR"
+  echo "  使用你已设置的 TMPDIR"
+elif [ -n "$CACHE_HOME" ]; then
+  TMP_BASE="$CACHE_HOME/tmp"
+else
+  TMP_BASE="/tmp"
 fi
 export TMPDIR="$TMP_BASE"
 mkdir -p "$TMPDIR" 2>/dev/null || true
@@ -254,28 +303,20 @@ fi
 # Camoufox 认 XDG_CACHE_HOME，Playwright/Patchright 认 PLAYWRIGHT_BROWSERS_PATH。
 # TMPDIR 同样要写进去 —— camoufox 下载 zip 时用的是 tempfile，
 # 落在 /tmp（很可能是小 tmpfs）就会 No space left on device。
+set_env() {
+  local key="$1" val="$2"
+  if grep -qE "^${key}=" "$APP_DIR/.env"; then
+    sed -i "s|^${key}=.*|${key}=${val}|" "$APP_DIR/.env"
+  else
+    printf '%s=%s\n' "$key" "$val" >> "$APP_DIR/.env"
+  fi
+}
 if [ -n "$CACHE_HOME" ]; then
-  set_env() {
-    local key="$1" val="$2"
-    if grep -qE "^${key}=" "$APP_DIR/.env"; then
-      sed -i "s|^${key}=.*|${key}=${val}|" "$APP_DIR/.env"
-    else
-      printf '%s=%s\n' "$key" "$val" >> "$APP_DIR/.env"
-    fi
-  }
   set_env XDG_CACHE_HOME "$CACHE_HOME"
   set_env PLAYWRIGHT_BROWSERS_PATH "$CACHE_HOME/ms-playwright"
   grn "已把缓存路径写入 .env"
 fi
 if [ -n "${TMPDIR:-}" ] && [ "$TMPDIR" != "/tmp" ]; then
-  set_env() {
-    local key="$1" val="$2"
-    if grep -qE "^${key}=" "$APP_DIR/.env"; then
-      sed -i "s|^${key}=.*|${key}=${val}|" "$APP_DIR/.env"
-    else
-      printf '%s=%s\n' "$key" "$val" >> "$APP_DIR/.env"
-    fi
-  }
   set_env TMPDIR "$TMPDIR"
   grn "已把 TMPDIR=$TMPDIR 写入 .env"
 fi

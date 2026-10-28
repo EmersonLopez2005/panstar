@@ -174,9 +174,18 @@ Camoufox 的真实开销是 **峰值约 2.6GB**（下载包 ~1.2GB 和解压后�
 > 于是「磁盘有 6GB，但下载到 0.5GB 就失败」。
 > 安装脚本现在会检测临时目录可用空间并在不足时直接报错。
 
+> ⚠️ **`--cache` 别指向 `$HOME/.cache` 本身。**
+> `--cache=/root/.cache` 会让脚本造出 `~/.cache/camoufox -> /root/.cache/camoufox`
+> 这种指向自己的软链接，导致 `mkdir(exist_ok=True)` 抛
+> `FileExistsError: [Errno 17] File exists`（`is_dir()` 因 ELOOP 返回 False）。
+> 想用默认位置就直接**不传 `--cache`**；要换盘就用 `--cache=/root/browser` 这种独立目录。
+> （脚本现在也会检测并自愈这个情况，但避开更省事。）
+
 > `--cache=` 用「软链接 + `XDG_CACHE_HOME`」双保险实现：
 > Camoufox 认 `XDG_CACHE_HOME`，Playwright/Patchright 认 `PLAYWRIGHT_BROWSERS_PATH`。
 > 路径会同时写进 `.env` 和 systemd 单元，cron 环境下也能找到。
+> **安装脚本会在下载前 `export` 这两个变量** —— 写进 `.env` 要等下次进程启动才生效，
+> 而浏览器下载就发生在当前进程里，不 export 会装错地方。
 
 **签到一直失败时按这个顺序查：**
 
@@ -190,6 +199,7 @@ Camoufox 的真实开销是 **峰值约 2.6GB**（下载包 ~1.2GB 和解压后�
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `No space left on device`（但 `df` 显示空间充足） | **camoufox 把下载的 zip 落在 `$TMPDIR`/`/tmp`**，很多 VPS 的 `/tmp` 是小 tmpfs（内存盘） | `export TMPDIR=/大盘/tmp && mkdir -p $TMPDIR` 再重装；安装脚本会自动检测并提示 |
+| `FileExistsError: [Errno 17] File exists: '.../camoufox'` | `--cache` 指向的目录**正好是 `$HOME/.cache` 本身**，脚本造出了指向自己的软链接 | 换一个 `--cache` 路径（如 `--cache=/root/browser`），或直接不用 `--cache` |
 | 下载到一半 ENOSPC | 同上 | 同上 |
 | 装完显示"就绪"但实际没有浏览器 | camoufox CLI 失败时仍返回 0 | 现已改为校验 `camoufox-bin` 是否真的存在，不存在直接报错退出 |
 | `ModuleNotFoundError: flask`（agent 起不来） | 只装了主 requirements，漏了 agent 依赖 | 已修：安装脚本现在会装 `agent/requirements.txt` |
