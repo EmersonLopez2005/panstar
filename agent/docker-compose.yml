@@ -1,0 +1,35 @@
+services:
+  panstar-agent:
+    build:
+      context: .
+      args:
+        # camoufox(默认，实测能过 CF) / patchright(轻但过 CF 成功率低)
+        ENGINE: camoufox
+    image: panstar-agent:latest
+    container_name: panstar-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      AGENT_HOST: 0.0.0.0
+      AGENT_PORT: "3000"
+      AGENT_HEADLESS: "false"   # 必须 false（配 Xvfb），无头过不了 CF
+      TZ: Asia/Shanghai
+    ports:
+      # 只给内网/组网用，别直接裸奔公网
+      - "3000:3000"
+    volumes:
+      # profile / 日志都在这里，换镜像不丢指纹
+      - ./data:/app/data
+    shm_size: "512mb"
+    security_opt:
+      - seccomp=unconfined
+    # 资源上限：浏览器只在跑挑战那几十秒吃内存，平时 agent 只有几十 MB。
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 1.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

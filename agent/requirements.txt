@@ -1,0 +1,4 @@
+# 浏览器代理服务依赖
+flask>=3.0.0
+requests>=2.31.0
+camoufox[geoip]>=0.5.0

@@ -1,0 +1,26 @@
+# 配置（含账号密码，绝不能提交）
+.env
+agent/.env
+
+# 运行时数据
+logs/
+data/
+cookie/
+agent/data/
+agent/logs/
+
+# 浏览器 profile（含指纹与 cookie）
+*.profile/
+profile*/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
