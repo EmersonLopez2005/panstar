@@ -223,9 +223,14 @@ def api_turnstile():
         print(f"[turnstile] 成功 用时 {cost}s token={token[:40]}…", flush=True)
         return jsonify({"ok": True, "token": token, "cost": cost})
     except Exception as exc:  # noqa: BLE001
+        import traceback
+        tb = traceback.format_exc()
         print(f"[turnstile] 失败 {type(exc).__name__}: {exc}", flush=True)
+        print(f"[turnstile] ---- traceback ----\n{tb}", flush=True)
+        print("[turnstile] ---- /end traceback ----", flush=True)
         return jsonify({"ok": False, "error": "INTERNAL",
-                        "message": f"{type(exc).__name__}: {exc}"}), 500
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "traceback": tb}), 500
     finally:
         _BUSY.clear()
         _lock.release()
@@ -286,9 +291,18 @@ def api_checkin():
         print(f"[checkin] 结束 用时 {cost}s 结果={result}", flush=True)
         return jsonify({"ok": True, "result": result, "cost": cost})
     except Exception as exc:  # noqa: BLE001
+        # **必须打印完整 traceback。**
+        # 只报 `f"{type(exc).__name__}: {exc}"` 会丢掉最关键的信息 ——
+        # 报错发生在哪一行、经过了什么调用链，全都没了。
+        # 之前就因为吞掉 traceback，只能靠猜来定位问题（绕了好大一圈）。
+        import traceback
+        tb = traceback.format_exc()
         print(f"[checkin] 失败 {type(exc).__name__}: {exc}", flush=True)
+        print(f"[checkin] ---- traceback ----\n{tb}", flush=True)
+        print("[checkin] ---- /end traceback ----", flush=True)
         return jsonify({"ok": False, "error": "INTERNAL",
-                        "message": f"{type(exc).__name__}: {exc}"}), 500
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "traceback": tb}), 500
     finally:
         _BUSY.clear()
         _lock.release()

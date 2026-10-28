@@ -237,12 +237,17 @@ def agent_checkin(agent_url: str, agent_token: str, access_token: str = "",
                 "    A) 重新跑安装脚本，它会把 token 统一写进 .env：\n"
                 "         bash install_vps.sh --agent\n"
                 "    B) 手动同步（注意 .env 里是 LOGIN_AGENT_TOKEN）：\n"
-                "         grep AGENT_TOKEN /etc/systemd/system/panstar-agent.service\n"
-                "         # 把上面那串填到 .env 的 LOGIN_AGENT_TOKEN= 后面\n"
+                "         grep AGENT_TOKEN /etc/systemd/system/panstar-agent.service | cut -d= -f3\n"
+                "         # 把上面那串（只有值，不要带 AGENT_TOKEN= 前缀）填到 .env\n"
                 "       然后 systemctl restart panstar-agent"
             )
+        # agent 带了 traceback 就一起带出来 —— 只看一行异常消息无法定位问题
+        tb = data.get("traceback") or ""
+        msg = data.get("message") or data.get("error") or resp.text[:150]
+        if tb:
+            raise RuntimeError(f"浏览器代理失败: {msg}\n{tb}")
         raise RuntimeError(
-            f"浏览器代理失败: {data.get('message') or data.get('error') or resp.text[:150]}"
+            f"浏览器代理失败: {msg}"
         )
     return data.get("result") or {}
 

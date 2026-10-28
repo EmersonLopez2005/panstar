@@ -62,8 +62,10 @@ def solve_via_agent(agent_url: str, agent_token: str, site_key: str,
     except Exception:
         raise TurnstileError(f"浏览器代理返回非 JSON: {resp.text[:200]}")
     if not data.get("ok"):
+        tb = data.get("traceback") or ""
+        msg = data.get("message") or data.get("error") or resp.text[:150]
         raise TurnstileError(
-            f"浏览器代理失败: {data.get('message') or data.get('error') or resp.text[:150]}"
+            f"浏览器代理失败: {msg}" + (f"\n{tb}" if tb else "")
         )
     token = data.get("token") or ""
     if not token:
