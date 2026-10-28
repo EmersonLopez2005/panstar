@@ -1,4 +1,43 @@
 
+# PanstarCloud 自动签到（独立 VPS 项目）
+
+给 [panstar.ai](https://panstar.ai) 做每日签到，**自带浏览器，不依赖打码服务**。
+
+## 为什么不用打码服务
+
+站点签到强制要 Cloudflare Turnstile token（`checkinSecurityState: REQUIRED`），实测：
+
+| 方案 | 结果 |
+|---|---|
+| 打码服务（CloudFreed） | 容器里能 createTask，但 90s 拿不到 token；且 token 会因来源 IP/UA 不匹配被判无效 |
+| 普通 Playwright/Chrome 自动化 | **Turnstile Error 600010**（widget already executing），CF 直接判 bot |
+| **Camoufox + 有头 + 持久化 profile** | ✅ 这是本项目采用的方式 |
+
+所以这个项目自带一个常驻的浏览器服务，用**反检测浏览器（Camoufox，Firefox 定制版）**
+在真实页面里把 Turnstile 跑出来 —— token 的来源与请求方天然一致。
+
+> 你截图里真浏览器签到成功（26 经验），也印证了这点：站点没坏，
+> 坏的是自动化环境被 Cloudflare 认出来了。
+
+## 三层结构
+
+```
+┌─────────────────────────────────────────┐
+│  run_sign.sh（cron 包装）                 │  ← cron 只调这一个
+├─────────────────────────────────────────┤
+│  panstar_sign.py（主脚本）                │
+│    1. 取令牌：refreshToken 续期 → 密码登录 │
+│    2. 查今日状态：已签到就直接返回          │
+│    3. 签到：免ticket直签 → 浏览器 → 带ticket │
+├─────────────────────────────────────────┤
+│  panstar_client.py（站点 API）             │  AES-GCM 解密 + Sec-Fetch 来源头
+│  turnstile_solver.py（取 token）          │  浏览器代理 → 本地浏览器
+├─────────────────────────────────────────┤
+│  agent/（浏览器代理，常驻）                │
+│    panstar_agent.py    Flask HTTP 服务     │
+│    browser_engine.py   反检测浏览器适配层   │
+└─────────────────────────────────────────┘
+```
 
 ## 快速开始（Debian 12/13、Ubuntu 22.04+）
 
@@ -9,7 +48,8 @@ git clone https://github.com/EmersonLopez2005/panstar.git && cd panstar
 bash install_vps.sh --agent
 
 # 空间紧张时：把浏览器内核放到另一块盘 + 跳过中文字体
-bash install_vps.sh --agent --cache=/mnt/大硬盘 --no-cjk-fonts
+# ⚠️ 路径请用纯英文（Firefox / systemd 对非 ASCII 路径可能出意外）
+bash install_vps.sh --agent --cache=/mnt/browser --no-cjk-fonts
 
 # 体检：看出口 IP、浏览器能不能过挑战
 python3 check_env.py
