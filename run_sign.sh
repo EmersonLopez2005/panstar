@@ -100,7 +100,7 @@ CODE=${PIPESTATUS[0]}
 
 {
   echo "[$(ts)] 结束，退出码 $CODE"
-  echo "$ts" > "$HEARTBEAT"
+  echo "$(ts)" > "$HEARTBEAT"
 } >> "$LOG_FILE"
 
 exit $CODE

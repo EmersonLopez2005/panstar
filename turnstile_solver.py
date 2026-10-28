@@ -86,6 +86,21 @@ def solve_via_local_browser(site_key: str, url: str, action: str = "",
       - 优先 camoufox（Firefox 定制版，指纹伪装强），
         其次 patchright / playwright。
     """
+    # 先确认引擎真的可用（浏览器本体已下载），避免运行到一半才去下 1.3GB。
+    try:
+        from browser_engine import engine_status, missing_browser_hint
+    except ImportError:
+        engine_status = None
+
+    if engine_status:
+        status = engine_status()
+        usable = [n for n, i in status.items() if i["package"] and i["binary"]]
+        if not usable:
+            raise TurnstileError(
+                "本地浏览器不可用（浏览器本体未下载）:\n"
+                + missing_browser_hint()
+            )
+
     try:
         from browser_engine import browser_page
     except ImportError:
@@ -169,6 +184,25 @@ def _drive_turnstile(page, site_key: str, url: str, action: str,
     )
 
 
+def check_agent_health(agent_url: str, agent_token: str = "") -> dict:
+    """检查浏览器代理是否在线。返回 {"ok": bool, "engine": str, "message": str}"""
+    try:
+        headers = {}
+        if agent_token:
+            headers["Authorization"] = f"Bearer {agent_token}"
+        resp = requests.get(f"{agent_url.rstrip('/')}/health", headers=headers, timeout=8)
+        if resp.status_code != 200:
+            return {"ok": False, "engine": "", "message": f"HTTP {resp.status_code}"}
+        data = resp.json()
+        return {
+            "ok": bool(data.get("ok")),
+            "engine": data.get("engine", ""),
+            "message": data.get("message", ""),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "engine": "", "message": str(exc)}
+
+
 # --------------------------------------------------------------------------
 # 统一入口：按优先级依次尝试
 # --------------------------------------------------------------------------
@@ -183,14 +217,24 @@ def get_turnstile_token(site_key: str, url: str, action: str = "",
     attempts = []
 
     if agent_url:
-        try:
-            print("[turnstile] 尝试路径1：浏览器代理")
-            token = solve_via_agent(agent_url, agent_token, site_key, url, action)
-            print(f"[turnstile] 浏览器代理成功 (token {len(token)} 字符)")
-            return token
-        except Exception as exc:
-            attempts.append(f"浏览器代理: {exc}")
-            print(f"[turnstile] 浏览器代理失败: {exc}")
+        # 先探一下 agent 是否在线，失败要给出可操作的提示，
+        # 而不是一句"连接失败"让人摸不着头脑。
+        health = check_agent_health(agent_url, agent_token)
+        if not health["ok"]:
+            msg = f"浏览器代理不可用 ({health['message']})"
+            attempts.append(msg)
+            print(f"[turnstile] {msg}")
+            print("[turnstile]   启动它：systemctl start panstar-agent"
+                  " 或 cd agent && docker compose up -d")
+        else:
+            try:
+                print(f"[turnstile] 尝试路径1：浏览器代理（engine={health['engine']}）")
+                token = solve_via_agent(agent_url, agent_token, site_key, url, action)
+                print(f"[turnstile] 浏览器代理成功 (token {len(token)} 字符)")
+                return token
+            except Exception as exc:
+                attempts.append(f"浏览器代理: {exc}")
+                print(f"[turnstile] 浏览器代理失败: {exc}")
 
     try:
         print("[turnstile] 尝试路径2：本地浏览器")

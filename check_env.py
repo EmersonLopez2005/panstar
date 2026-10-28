@@ -64,60 +64,77 @@ def check_network() -> None:
     print("     如果签到一直失败，先查这条。")
 
 
+def check_disk() -> None:
+    hr("【3】磁盘空间")
+    try:
+        st = os.statvfs(os.path.dirname(os.path.abspath(__file__)))
+        avail_mb = st.f_bavail * st.f_frsize / 1024 / 1024
+        total_mb = st.f_blocks * st.f_frsize / 1024 / 1024
+        print(f"  可用: {avail_mb:.0f} MB / 总计 {total_mb:.0f} MB")
+        need = 4096
+        if avail_mb < need:
+            print(f"  ❌ 空间不足！Camoufox 需要约 1.3GB，建议至少留 {need} MB")
+            print("     清理：bash cleanup_browsers.sh --clean")
+            print("           sudo apt-get autoremove -y && sudo apt-get clean")
+            print("     或换轻量引擎：bash install_vps.sh --engine=patchright")
+        else:
+            print(f"  ✅ 空间充足（建议至少 {need} MB）")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ 读不到磁盘信息: {exc}")
+
+
 def check_browser(skip: bool = False) -> None:
-    hr("【3】浏览器")
+    hr("【4】浏览器")
     if skip:
         print("  (已跳过)")
         return
 
     print(f"  Xvfb: {'✅ ' + shutil.which('Xvfb') if shutil.which('Xvfb') else '❌ 未安装（必装，headless 过不了 CF）'}")
 
-    camoufox_ok = False
-    try:
-        import camoufox  # noqa: F401
-        camoufox_ok = True
-        print("  Camoufox: ✅ 已安装（推荐）")
-    except ImportError:
-        print("  Camoufox: ❌ 未安装（pip install camoufox[geoip] && python -m camoufox fetch）")
-
-    patchright_ok = False
-    try:
-        import patchright  # noqa: F401
-        patchright_ok = True
-        print("  Patchright: ✅ 已安装（备选，成功率较低）")
-    except ImportError:
-        print("  Patchright: ❌ 未安装")
-
-    if not (camoufox_ok or patchright_ok):
-        print("\n  ❌ 没有任何浏览器引擎，签到无法进行。跑 install_vps.sh 装一下。")
-        return
-
-    print("\n  实测挑战（起一个浏览器试跑 Turnstile）…")
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from browser_engine import browser_page, resolve_engine
+        from browser_engine import engine_status, missing_browser_hint, resolve_engine
+
+        status = engine_status()
+        print("\n  引擎状态（包已装 ≠ 浏览器已下载，两个都要有）：")
+        any_ok = False
+        for name, info in status.items():
+            pkg = "✅" if info["package"] else "❌"
+            binary = "✅" if info["binary"] else "❌"
+            print(f"    {name:12} 包={pkg}  浏览器本体={binary}")
+            if info["package"] and info["binary"]:
+                any_ok = True
+
+        if not any_ok:
+            print("\n  ❌ 没有可用的引擎")
+            print("  " + missing_browser_hint().replace("\n", "\n  "))
+            return
 
         engine = resolve_engine()
-        print(f"  引擎: {engine}")
-        with browser_page(engine=engine, headless=False,
-                          user_data_dir=os.path.join(
-                              os.path.dirname(os.path.abspath(__file__)),
-                              "data", "check-profile")) as page:
-            page.goto("https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit",
-                      wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(5000)
-            ok = page.evaluate("() => typeof window.turnstile === 'object'")
-            print(f"  Turnstile API 加载: {'✅' if ok else '❌'}")
-            if ok:
-                print("  ✅ 这台机器的环境基本可用")
-            else:
-                print("  ⚠️ Turnstile API 没加载出来，检查网络/代理")
+        print(f"\n  将使用: {engine}")
+        print("\n  实测挑战（起一个浏览器试跑 Turnstile）…")
+        try:
+            with browser_page(engine=engine, headless=False,
+                              user_data_dir=os.path.join(
+                                  os.path.dirname(os.path.abspath(__file__)),
+                                  "data", "check-profile")) as page:
+                page.goto("https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit",
+                          wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(5000)
+                ok = page.evaluate("() => typeof window.turnstile === 'object'")
+                print(f"  Turnstile API 加载: {'✅' if ok else '❌'}")
+                if ok:
+                    print("  ✅ 这台机器的环境基本可用")
+                else:
+                    print("  ⚠️ Turnstile API 没加载出来，检查网络/代理")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ❌ 实测失败: {type(exc).__name__}: {exc}")
     except Exception as exc:  # noqa: BLE001
-        print(f"  ❌ 实测失败: {type(exc).__name__}: {exc}")
+        print(f"  ❌ 检查引擎失败: {exc}")
 
 
 def check_site() -> None:
-    hr("【4】站点连通")
+    hr("【5】站点连通")
     try:
         import requests
         domain = os.environ.get("PS_DOMAIN", "https://panstar.ai")
@@ -137,6 +154,7 @@ def main() -> int:
     skip_browser = "--skip-browser" in sys.argv
     check_system()
     check_network()
+    check_disk()
     check_browser(skip=skip_browser)
     check_site()
     hr("体检结束")

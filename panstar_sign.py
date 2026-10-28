@@ -239,6 +239,22 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
     agent_token = cfg("LOGIN_AGENT_TOKEN")
     profile_name = cfg("PS_PROFILE", "default")
 
+    # agent 状态自检：配置了但没起来，要立刻说清楚，
+    # 否则用户只会看到"本地浏览器失败"，以为是浏览器的问题。
+    if agent_url:
+        from turnstile_solver import check_agent_health
+        health = check_agent_health(agent_url, agent_token)
+        if health["ok"]:
+            print(f"[agent] 在线（engine={health['engine']}）")
+        else:
+            print(f"[agent] ⚠️ 不可用: {health['message']}")
+            print("[agent]    启动：systemctl start panstar-agent"
+                  "  或  cd agent && docker compose up -d")
+    else:
+        print("[agent] 未配置 LOGIN_AGENT_URL，将使用本机浏览器")
+        print("[agent]    提示：本机浏览器需要约 1.3GB 磁盘（Camoufox），"
+              "VPS 空间紧张时更推荐用 agent")
+
     # 3a. 免 ticket 直签：服务端放行就完全不需要验证码
     print("[checkin] 先尝试免 ticket 直接签到")
     try:
@@ -383,4 +399,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Camoufox / Playwright 在浏览器启动失败时会残留 asyncio 任务，
+    # 退出时打印 "Task was destroyed but it is pending!" 之类的噪音。
+    # 这些不是错误，只是难看 —— 直接静音，让真实错误不被淹没。
+    import logging
+    import warnings
+
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+    try:
+        from playwright._impl._errors import TargetClosedError
+        logging.getLogger("playwright").setLevel(logging.CRITICAL)
+    except Exception:
+        pass
+
     sys.exit(main())

@@ -86,6 +86,29 @@ $SUDO apt-get install -y --no-install-recommends \
   >/dev/null
 grn "系统依赖就绪"
 
+# ---------------------------------------------------------------- 磁盘空间
+# Camoufox 浏览器本体约 1.3GB，下载前必须先确认空间够，
+# 否则会下到一半报 "No space left on device"，留下一堆垃圾还查不清原因。
+step "检查磁盘空间"
+AVAIL_MB=$(df -Pm "$APP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+if [ -z "$AVAIL_MB" ]; then
+  ylw "  读不到磁盘信息，跳过检查"
+else
+  NEED_MB=4096
+  echo "  可用空间: ${AVAIL_MB} MB（需要至少 ${NEED_MB} MB）"
+  if [ "$AVAIL_MB" -lt "$NEED_MB" ]; then
+    red "  ❌ 磁盘空间不足！Camoufox 需要约 1.3GB，加上 venv 与系统依赖建议留 4GB。"
+    echo ""
+    echo "  先清理空间（会删 apt 缓存、旧浏览器内核、Docker 悬空镜像、系统日志）："
+    echo "    bash $APP_DIR/cleanup_disk.sh --clean"
+    echo ""
+    echo "  或改用体积小的 Chromium 引擎（过 CF 成功率较低）："
+    echo "    bash $APP_DIR/install_vps.sh --engine=patchright"
+    exit 1
+  fi
+  grn "磁盘空间充足"
+fi
+
 # ---------------------------------------------------------------- Python 环境
 step "创建 venv"
 if [ ! -x "$PY" ]; then

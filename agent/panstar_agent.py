@@ -336,6 +336,15 @@ def _do_browser_checkin(page, username: str, password: str) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
+    # 浏览器启动失败时残留的 asyncio 任务会打印 "Task was destroyed..." 噪音，
+    # 静音它们，免得淹没真正的错误信息。
+    import logging
+    import warnings
+
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+    logging.getLogger("playwright").setLevel(logging.CRITICAL)
+
     os.makedirs(PROFILE_DIR, exist_ok=True)
     print(f"[agent] 启动于 {AGENT_HOST}:{AGENT_PORT} engine={ENGINE} "
           f"headless={HEADLESS}", flush=True)

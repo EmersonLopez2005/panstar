@@ -1,9 +1,47 @@
+# PanstarCloud 自动签到（独立 VPS 项目）
 
+给 [panstar.ai](https://panstar.ai) 做每日签到，**自带浏览器，不依赖打码服务**。
+
+## 为什么不用打码服务
+
+站点签到强制要 Cloudflare Turnstile token（`checkinSecurityState: REQUIRED`），实测：
+
+| 方案 | 结果 |
+|---|---|
+| 打码服务（CloudFreed） | 容器里能 createTask，但 90s 拿不到 token；且 token 会因来源 IP/UA 不匹配被判无效 |
+| 普通 Playwright/Chrome 自动化 | **Turnstile Error 600010**（widget already executing），CF 直接判 bot |
+| **Camoufox + 有头 + 持久化 profile** | ✅ 这是本项目采用的方式 |
+
+所以这个项目自带一个常驻的浏览器服务，用**反检测浏览器（Camoufox，Firefox 定制版）**
+在真实页面里把 Turnstile 跑出来 —— token 的来源与请求方天然一致。
+
+> 你截图里真浏览器签到成功（26 经验），也印证了这点：站点没坏，
+> 坏的是自动化环境被 Cloudflare 认出来了。
+
+## 三层结构
+
+```
+┌─────────────────────────────────────────┐
+│  run_sign.sh（cron 包装）                 │  ← cron 只调这一个
+├─────────────────────────────────────────┤
+│  panstar_sign.py（主脚本）                │
+│    1. 取令牌：refreshToken 续期 → 密码登录 │
+│    2. 查今日状态：已签到就直接返回          │
+│    3. 签到：免ticket直签 → 浏览器 → 带ticket │
+├─────────────────────────────────────────┤
+│  panstar_client.py（站点 API）             │  AES-GCM 解密 + Sec-Fetch 来源头
+│  turnstile_solver.py（取 token）          │  浏览器代理 → 本地浏览器
+├─────────────────────────────────────────┤
+│  agent/（浏览器代理，常驻）                │
+│    panstar_agent.py    Flask HTTP 服务     │
+│    browser_engine.py   反检测浏览器适配层   │
+└─────────────────────────────────────────┘
+```
 
 ## 快速开始（Debian 12/13、Ubuntu 22.04+）
 
 ```bash
-git clone https://github.com/EmersonLopez2005/panstar.git && cd panstar
+git clone <这个仓库> panstar-autosign && cd panstar-autosign
 
 # 装依赖 + 浏览器 + venv（Camoufox 约 1.3GB，下载慢是正常的）
 bash install_vps.sh --agent
@@ -76,6 +114,7 @@ panstar-autosign/
 ├── install_vps.sh          一键安装
 ├── run_sign.sh             cron 包装（带锁/心跳/预演）
 ├── cleanup_browsers.sh     清理多余浏览器内核
+├── cleanup_disk.sh         磁盘清理（apt缓存/旧内核/Docker镜像/日志）
 ├── agent/
 │   ├── panstar_agent.py    浏览器代理 HTTP 服务
 │   ├── browser_engine.py   （同上，agent 侧副本）
@@ -101,14 +140,29 @@ journalctl -u panstar-agent -n 100
 
 # agent 健康检查
 curl http://127.0.0.1:3000/health
+
+# 磁盘清理（Camoufox 需要 1.3GB，空间紧张时先跑）
+bash cleanup_disk.sh          # 只报告
+bash cleanup_disk.sh --clean  # 真删
 ```
 
 **签到一直失败时按这个顺序查：**
 
-1. `python3 check_env.py` —— 出口 IP 是机房 IP 吗？浏览器能过挑战吗？
+1. `python3 check_env.py` —— 磁盘够吗？出口 IP 是机房 IP 吗？浏览器能过挑战吗？
 2. `curl http://127.0.0.1:3000/health` —— agent 活着吗？engine 对吗？
 3. `logs/sign.log` 里 `[turnstile]` 那几行 —— 卡在哪条路径？
 4. 出口 IP 不干净 → 租个住宅代理，填 `AGENT_PROXY`
+
+### 常见故障
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `No space left on device` | 磁盘满，Camoufox 下到一半失败 | `bash cleanup_disk.sh --clean`，然后重装浏览器 |
+| `[agent] 不可用` | agent 没启动 | `systemctl start panstar-agent` 或 `cd agent && docker compose up -d` |
+| `没有可用的浏览器引擎` | pip 装了包但浏览器本体没下载 | `python -m camoufox fetch`（约 1.3GB） |
+| `Task was destroyed but it is pending!` | 浏览器启动失败的 asyncio 残留噪音 | 已静音，不是错误 |
+| `ts: unbound variable` | 旧版 `run_sign.sh` 的 bug | 升级到最新版（已修） |
+| 一直报 `需要 Turnstile` 但浏览器在跑 | 出口 IP 被 Cloudflare 判高风险 | 换 IP 或挂 `AGENT_PROXY` |
 
 ## 常见问题
 

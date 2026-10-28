@@ -54,24 +54,77 @@ def _ensure_display() -> Optional[subprocess.Popen]:
     return proc
 
 
-def _has_camoufox() -> bool:
+def _camoufox_binary_installed() -> bool:
+    """检查 Camoufox 浏览器本体是否已下载。
+
+    `pip install camoufox` 只装了 Python 包，浏览器本体（约 1.3GB）还需要
+    单独执行 `python -m camoufox fetch` 才会下载。
+
+    只判 import 会造成误判：以为引擎可用，实际在运行时才去下载，
+    磁盘不够就直接失败（ERRNO 28 No space left on device）。
+    """
     try:
-        import camoufox  # noqa: F401
-        return True
+        from camoufox import pkgman
     except ImportError:
         return False
+
+    # 新版 camoufox 提供了路径查询接口
+    for attr in ("installed_path", "camoufox_path", "get_camoufox_path"):
+        fn = getattr(pkgman, attr, None)
+        if callable(fn):
+            try:
+                path = fn()
+                if path and os.path.exists(path):
+                    return True
+            except Exception:
+                continue
+
+    # 兜底：检查缓存目录里是否有实际文件
+    candidates = [
+        os.path.join(os.path.expanduser("~"), ".cache", "camoufox"),
+        os.path.join(os.path.expanduser("~"), "Library", "Caches", "camoufox"),
+        "/root/.cache/camoufox",
+    ]
+    for root in candidates:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                if name == "camoufox" or name.endswith(".so") or name == "firefox":
+                    return True
+    return False
+
+
+def _has_camoufox() -> bool:
+    """Camoufox 是否真正可用（包已装 **且** 浏览器本体已下载）。"""
+    try:
+        import camoufox  # noqa: F401
+    except ImportError:
+        return False
+    return _camoufox_binary_installed()
 
 
 def _has_patchright() -> bool:
+    """Patchright 的 Chromium 是否已下载。"""
     try:
         import patchright  # noqa: F401
-        return True
     except ImportError:
         return False
+    root = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
+    if not os.path.isdir(root):
+        return False
+    for name in os.listdir(root):
+        if name.startswith("chromium"):
+            return True
+    return False
 
 
 def resolve_engine(preferred: Optional[str] = None) -> str:
-    """决定用哪个浏览器引擎。"""
+    """决定用哪个浏览器引擎。
+
+    注意：这里必须确认「浏览器本体已下载」，而不只是 pip 包已装。
+    否则会在真正跑签到时才去下载 1.3GB，磁盘不够就直接失败。
+    """
     pref = (preferred or os.getenv("PS_ENGINE") or "auto").strip().lower()
     if pref in ("camoufox", "patchright", "playwright"):
         return pref
@@ -80,6 +133,64 @@ def resolve_engine(preferred: Optional[str] = None) -> str:
     if _has_patchright():
         return "patchright"
     return "playwright"
+
+
+def engine_status() -> dict:
+    """各引擎的可用状态，用于体检与错误提示。"""
+    return {
+        "camoufox": {
+            "package": _package_installed("camoufox"),
+            "binary": _camoufox_binary_installed(),
+        },
+        "patchright": {
+            "package": _package_installed("patchright"),
+            "binary": _has_patchright(),
+        },
+        "playwright": {
+            "package": _package_installed("playwright"),
+            "binary": _playwright_binary_installed(),
+        },
+    }
+
+
+def _package_installed(name: str) -> bool:
+    try:
+        __import__(name)
+        return True
+    except ImportError:
+        return False
+
+
+def _playwright_binary_installed() -> bool:
+    root = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
+    if not os.path.isdir(root):
+        return False
+    for name in os.listdir(root):
+        if name.startswith("chromium"):
+            return True
+    return False
+
+
+def missing_browser_hint() -> str:
+    """所有引擎都不可用时，给出可执行的修复建议。"""
+    status = engine_status()
+    lines = ["没有可用的浏览器引擎。"]
+    if status["camoufox"]["package"] and not status["camoufox"]["binary"]:
+        lines.append(
+            "  Camoufox 的 Python 包已装，但浏览器本体（约 1.3GB）没下载 —— "
+            "执行：python -m camoufox fetch"
+        )
+    elif not status["camoufox"]["package"]:
+        lines.append(
+            "  安装 Camoufox：pip install 'camoufox[geoip]' && python -m camoufox fetch"
+        )
+    if not status["patchright"]["binary"]:
+        lines.append(
+            "  备选（体积小但过 CF 成功率低）："
+            "pip install patchright && patchright install --with-deps chromium"
+        )
+    lines.append("  提示：浏览器本体需要约 1.3GB，请先确认磁盘空间足够。")
+    return "\n".join(lines)
 
 
 def parse_proxy(proxy: Optional[str]) -> Optional[dict]:
