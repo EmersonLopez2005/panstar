@@ -28,11 +28,15 @@ ENGINE="camoufox"
 CJK_FONTS=1
 FORCE=0
 CACHE_HOME=""
+CRON_TIME=""     # --at=HH:MM 或 --at=HH:MM,HH:MM
+CRON_EXPR=""     # --cron="分 时 日 月 周"
 
 for arg in "$@"; do
   case "$arg" in
     --engine=*) ENGINE="${arg#*=}";;
     --cache=*)  CACHE_HOME="${arg#*=}";;
+    --at=*)     CRON_TIME="${arg#*=}";;
+    --cron=*)   CRON_EXPR="${arg#*=}";;
     --no-cjk-fonts) CJK_FONTS=0;;
     --force)    FORCE=1;;
   esac
@@ -729,12 +733,32 @@ if ! command -v crontab >/dev/null 2>&1; then
 fi
 
 if command -v crontab >/dev/null 2>&1; then
-  CRON_LINE="17 3 * * * $APP_DIR/run_sign.sh >> $APP_DIR/logs/cron.log 2>&1"
+  # 定时时间：--at=HH:MM 或 --cron="分 时 日 月 周" 优先，默认每天 03:17
+  CRON_SPEC="17 3 * * *"
+  if [ -n "$CRON_EXPR" ]; then
+    fields="$(printf '%s\n' "$CRON_EXPR" | awk '{print NF}')"
+    if [ "$fields" -ne 5 ]; then
+      red "  ❌ --cron 需要 5 段（分 时 日 月 周），你给了 $fields 段"
+      exit 1
+    fi
+    CRON_SPEC="$CRON_EXPR"
+  elif [ -n "$CRON_TIME" ]; then
+    # 只支持单个时间点，多点请用 set_schedule.sh
+    t="$CRON_TIME"
+    if ! printf '%s' "$t" | grep -qE '^([01]?[0-9]|2[0-3]):[0-5][0-9]$'; then
+      red "  ❌ --at 格式不对：$t（应为 HH:MM，如 --at=07:30）"
+      exit 1
+    fi
+    CRON_SPEC="$((10#${t##*:})) $((10#${t%%:*})) * * *"
+  fi
+
+  CRON_LINE="$CRON_SPEC $APP_DIR/run_sign.sh >> $APP_DIR/logs/cron.log 2>&1 # panstar-autosign"
   if crontab -l 2>/dev/null | grep -qF "$APP_DIR/run_sign.sh"; then
-    ylw "定时任务已存在，跳过"
+    ylw "定时任务已存在，改用 set_schedule.sh 修改时间："
+    echo "    bash $APP_DIR/set_schedule.sh 07:30"
   else
     ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab -
-    grn "已安装定时任务（每天 03:17）："
+    grn "已安装定时任务（$CRON_SPEC）："
     echo "  $CRON_LINE"
   fi
 else

@@ -203,6 +203,48 @@ python fetch_camoufox.py
 > `export GITHUB_TOKEN=ghp_xxxx && python -m camoufox fetch`
 > token 建议只给 `public_repo` 读权限。
 
+## 修改定时任务时间
+
+默认**每天 03:17**（服务器本地时区）。
+
+```bash
+bash set_schedule.sh                 # 查看当前任务和下次运行时间
+bash set_schedule.sh 07:30           # 改成每天 07:30
+bash set_schedule.sh 07:30,20:00     # 每天两次
+bash set_schedule.sh --cron "0 */6 * * *"   # 直接写 cron 表达式
+bash set_schedule.sh --remove        # 删除定时任务
+```
+
+也可以在安装时直接指定：
+
+```bash
+bash install_vps.sh --agent --at=07:30
+bash install_vps.sh --agent --cron="0 */6 * * *"
+```
+
+> **这个脚本只动本项目的行，不碰你其它 crontab 条目**（备份、证书续期、
+> 监控之类）。写之前会：
+> - 先完整读出 crontab，读失败就中止（避免把整个 crontab 冲成空）
+> - 备份到 `logs/crontab.backup.<时间>.txt`
+> - 做完安全检查再一次性写入
+
+## 常见问题
+
+**Q: 签到时间点有什么讲究？**
+
+站点按自然日重置。建议选凌晨到早上（如 03:17～08:00），
+避开你自己可能手动签到的时段，也避开整点（整点各种任务扎堆）。
+
+**Q: 能一天跑多次吗？**
+
+可以（`bash set_schedule.sh 07:30,20:00`）。脚本会先查今日是否已签到，
+已签到就直接返回，不会重复签。
+
+**Q: 服务器时区对吗？**
+
+`set_schedule.sh` 会打印服务器时间和时区。日志里的时间戳带 `+08:00`
+说明是北京时间。时区不对会让 cron 在你意想不到的时间跑。
+
 ## 排错
 
 ```bash
