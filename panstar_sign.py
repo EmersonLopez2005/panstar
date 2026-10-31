@@ -328,7 +328,23 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
     })
 
     # --- 2. 查今日状态 ---
-    status = client.checkin_status()
+    # accessToken 有效期只有 15 分钟，ensure_token 刚取到但 checkin_status 时
+    # 若请求稍有延迟就可能已过期，返回 code=10。此时直接用密码重登录一次。
+    try:
+        status = client.checkin_status()
+    except PanstarError as exc:
+        if exc.code != 10:
+            raise
+        print(f"[auth] checkin_status 返回 token 失效（code=10），重新密码登录")
+        client.login(account, password, totp)
+        save_state(account, {
+            "refreshToken": client.refresh_token,
+            "accessToken": client.access_token,
+            "uid": client.uid,
+            "username": client.username,
+            "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        })
+        status = client.checkin_status()
     if status.get("checkedIn"):
         summary = format_summary(status)
         print(f"[checkin] 今日已签到 → {summary}")
@@ -381,9 +397,30 @@ def sign_one(account: str, password: str, totp: str = "") -> Dict[str, Any]:
         result = client.do_checkin("")
         print("[checkin] 免 ticket 签到成功，无需验证码")
     except PanstarError as exc:
-        if exc.code not in (718, 719, 720, 741):
+        if exc.code in (718, 719, 720, 741):
+            print(f"[checkin] 服务端要求验证（{exc.code}），转浏览器流程")
+        elif exc.code == 10:
+            # Token 过期（code=10）—— 重新用账号密码登录后再试一次直签。
+            # 不在这里 raise，因为这不是签到本身的失败，只是令牌失效，
+            # 密码重新登录后大概率可以继续走浏览器流程完成签到。
+            print(f"[checkin] 令牌失效（code=10），重新用账号密码登录后重试")
+            try:
+                client.login(account, password, totp)
+                save_state(account, {
+                    "refreshToken": client.refresh_token,
+                    "accessToken": client.access_token,
+                    "uid": client.uid,
+                    "username": client.username,
+                    "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                })
+                result = client.do_checkin("")
+                print("[checkin] 重登录后免 ticket 签到成功")
+            except PanstarError as exc2:
+                if exc2.code not in (718, 719, 720, 741):
+                    raise
+                print(f"[checkin] 重登录后服务端要求验证（{exc2.code}），转浏览器流程")
+        else:
             raise
-        print(f"[checkin] 服务端要求验证（{exc.code}），转浏览器流程")
 
     # 3b. 让浏览器代理直接在浏览器里完成整个签到（最接近真人操作）
     agent_failed = False
